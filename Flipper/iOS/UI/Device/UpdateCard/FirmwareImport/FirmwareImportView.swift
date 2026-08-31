@@ -37,10 +37,18 @@ final class FirmwareCatalog: ObservableObject {
     @Published var channel: [UUID: String] = [:]
     @Published var status: [UUID: Status] = [:]
 
+    // Nikita first: this is the Nikita app, so its own firmware is the default
+    // offer here as it is on the update card. Everything under it is what
+    // "import" means -- leaving Nikita for something else, and back again.
     let sources: [FirmwareSource] = [
+        .init(name: "Nikita",
+              blurb: "This ecosystem's own firmware. Unleashed, plus the Nikita agent.",
+              kind: .dirJson,
+              locator: URL.firmwareManifestURL.absoluteString,
+              channels: ["release", "rc", "dev"], defaultChannel: "release"),
         .init(name: "Official", blurb: "The original Flipper Devices firmware.",
               kind: .dirJson,
-              locator: "https://update.flipperzero.one/firmware/directory.json",
+              locator: URL.officialFirmwareManifestURL.absoluteString,
               channels: ["release", "dev"], defaultChannel: "release"),
         .init(name: "Momentum", blurb: "A feature rich community firmware.",
               kind: .dirJson,
@@ -106,9 +114,9 @@ final class FirmwareCatalog: ObservableObject {
                 as? [String: Any],
             let channels = root["channels"] as? [[String: Any]],
             let ch = channels.first(where: { ($0["id"] as? String) == wanted }),
-            let versions = ch["versions"] as? [[String: Any]],
-            let latest = versions.first
+            let versions = ch["versions"] as? [[String: Any]]
         else { throw Err.notFound }
+        guard let latest = versions.first else { throw Err.noReleases }
 
         let version = (latest["version"] as? String) ?? "?"
         let ts = (latest["timestamp"] as? Double)
@@ -142,11 +150,13 @@ final class FirmwareCatalog: ObservableObject {
         guard let releases = try JSONSerialization.jsonObject(with: data)
             as? [[String: Any]] else { throw Err.notFound }
 
+        guard !releases.isEmpty else { throw Err.noReleases }
+
         // release channel -> first non-prerelease; dev -> newest of any kind.
         let picked = wantDev
             ? releases.first
             : releases.first(where: { ($0["prerelease"] as? Bool) == false })
-        guard let release = picked ?? releases.first else { throw Err.notFound }
+        guard let release = picked ?? releases.first else { throw Err.noReleases }
 
         let tag = (release["tag_name"] as? String) ?? "?"
         let published = release["published_at"] as? String
@@ -175,12 +185,15 @@ final class FirmwareCatalog: ObservableObject {
     // MARK: Helpers
 
     private enum Err: LocalizedError {
-        case badURL, notFound, noBundle
+        case badURL, notFound, noBundle, noReleases
         var errorDescription: String? {
             switch self {
             case .badURL: return "bad url"
             case .notFound: return "not found"
             case .noBundle: return "no .tgz bundle"
+            // A channel that exists and is empty, which is how a firmware looks
+            // before its first release on that channel -- not a lookup failure.
+            case .noReleases: return "no releases yet"
             }
         }
     }
@@ -254,7 +267,7 @@ struct FirmwareImportView: View {
 
     private var header: some View {
         HStack {
-            Text("Custom Firmware")
+            Text("Firmware")
                 .font(.system(size: 18, weight: .bold))
                 .foregroundColor(.a1)
             Spacer()

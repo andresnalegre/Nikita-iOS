@@ -67,6 +67,8 @@ struct DeviceUpdateCard: View {
                     CardNoInternetError(retry: update)
                 case .error(.cantConnect):
                     CardCantConnectError(retry: update)
+                case .error(.noReleases):
+                    CardNoReleasesError(retry: update)
 
                 case .error(.noDevice):
                     CardNoDeviceError()

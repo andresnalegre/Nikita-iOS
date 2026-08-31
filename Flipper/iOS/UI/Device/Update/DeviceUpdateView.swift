@@ -41,7 +41,11 @@ struct DeviceUpdateView: View {
         switch state {
         case .error(let error):
             switch error {
-            case .noInternet, .noDevice, .cantConnect:
+            // noReleases cannot reach this screen -- an update in flight
+            // already has a firmware to install -- but it is still an error
+            // state, so it looks like one rather than silently showing the
+            // "updating happily" artwork.
+            case .noInternet, .noDevice, .cantConnect, .noReleases:
                 FlipperDeadImage()
             case .noCard:
                 FlipperFlashingIssueImage()

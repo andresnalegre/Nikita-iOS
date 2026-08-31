@@ -83,6 +83,12 @@ public class UpdateModel: ObservableObject {
             case noDevice
             case noInternet
             case cantConnect
+            // The feed was fetched and parsed, and has no build on the chosen
+            // channel. Kept apart from `cantConnect` because "Nikita has not
+            // published to this channel yet" and "the server is unreachable"
+            // are different problems with different fixes, and telling the user
+            // the wrong one sends them to check their Wi-Fi over nothing.
+            case noReleases
         }
     }
 
@@ -305,7 +311,14 @@ public class UpdateModel: ObservableObject {
     }
 
     func validateAvailableFirmware() -> Bool {
-        available != nil
+        guard available == nil else { return true }
+
+        // No build on this channel, but the feed itself was readable -- say so
+        // rather than leaving the card spinning on `loading` forever.
+        if manifest != nil, updateChannel != .custom {
+            state = .error(.noReleases)
+        }
+        return false
     }
 
     func checkManifestUpdate() -> Bool {
@@ -523,7 +536,9 @@ extension UpdateModel {
     ) {
         let result: Analytics.UpdateResult
         switch error {
-        case .cantConnect, .noInternet: result = .failedDownload
+        // noReleases cannot arise mid-update (an update in flight already has
+        // a firmware), but it is a download-side problem if it ever does.
+        case .cantConnect, .noInternet, .noReleases: result = .failedDownload
         case .noCard, .noDevice: result = .failedUpload
         }
         analytics.flipperUpdateResult(

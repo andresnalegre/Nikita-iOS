@@ -11,10 +11,12 @@ struct SelectChannelPopup: View {
             Spacer()
             Card {
                 VStack(alignment: .leading, spacing: 0) {
+                    // These three are Nikita's channels -- this app's default
+                    // firmware. "Import" below is how you leave it.
                     ChannelMenuRow(
                         title: "Release",
                         color: .release,
-                        description: "Stable release (recommended)",
+                        description: "Stable Nikita firmware (recommended)",
                         onPress: { onChannelSelected(.release) }
                     )
                     .padding(12)
@@ -25,7 +27,7 @@ struct SelectChannelPopup: View {
                     ChannelMenuRow(
                         title: "Release-Candidate",
                         color: .candidate,
-                        description: "Pre-release under testing",
+                        description: "Nikita firmware under testing",
                         onPress: { onChannelSelected(.candidate) }
                     )
                     .padding(12)
@@ -36,7 +38,7 @@ struct SelectChannelPopup: View {
                     ChannelMenuRow(
                         title: "Development",
                         color: .development,
-                        description: "Daily unstable build, lots of bugs",
+                        description: "Nikita build from the tip, lots of bugs",
                         onPress: { onChannelSelected(.development) }
                     )
                     .padding(12)
@@ -58,7 +60,7 @@ struct SelectChannelPopup: View {
                     ChannelMenuRow(
                         title: "Import",
                         color: .a1,
-                        description: "Official & community firmwares",
+                        description: "Official & other community firmwares",
                         onPress: { onImport() }
                     )
                     .padding(12)

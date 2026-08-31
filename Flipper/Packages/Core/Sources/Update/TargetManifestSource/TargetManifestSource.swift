@@ -25,6 +25,6 @@ class RemoteTargetManifestSource: TargetManifestSource {
         progress: @escaping (Double) -> Void
     ) async throws -> Update.Manifest {
         let manifest = try await manifestSource.get(progress: progress)
-        return try .init(for: target, from: manifest)
+        return .init(for: target, from: manifest)
     }
 }

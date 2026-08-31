@@ -89,6 +89,40 @@ extension DeviceUpdateCard {
         }
     }
 
+    // The feed was read and has nothing on this channel. Not a failure of the
+    // network, so it does not borrow the network's artwork or its wording.
+    struct CardNoReleasesError: View {
+        let retry: () -> Void
+
+        var body: some View {
+            VStack(spacing: 2) {
+                Text("No firmware in this channel yet")
+                    .font(.system(size: 14, weight: .medium))
+                HStack {
+                    Text(
+                        "Nothing has been published here. " +
+                        "Pick another channel, or use Import for other firmwares."
+                    )
+                    .font(.system(size: 14, weight: .medium))
+                    .multilineTextAlignment(.center)
+                    .foregroundColor(.black30)
+                }
+                .padding(.horizontal, 12)
+            }
+            .padding(.top, 12)
+            .padding(.vertical, 4)
+
+            Button {
+                retry()
+            } label: {
+                Text("Retry")
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(.a2)
+            }
+            .padding(.bottom, 8)
+        }
+    }
+
     struct CardNoDeviceError: View {
         var body: some View {
             VStack(spacing: 2) {

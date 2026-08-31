@@ -1,10 +1,23 @@
 import Foundation
 
 public enum Update {
+    // A channel with nothing published to it is a normal state, not a broken
+    // feed: Nikita starts every channel empty and fills them as releases are
+    // tagged, so `release` can carry a build while `development` is still bare.
+    // These were non-optional, which meant one empty channel threw and took the
+    // other two down with it -- the whole update card failed over a channel the
+    // user was not even on.
     public struct Manifest {
-        public let release: Firmware
-        public let candidate: Firmware
-        public let development: Firmware
+        public let release: Firmware?
+        public let candidate: Firmware?
+        public let development: Firmware?
+
+        // True when the feed parsed but carries no build on any channel.
+        // Distinguishable from "could not reach the feed", which is what the
+        // card used to report for both.
+        public var isEmpty: Bool {
+            release == nil && candidate == nil && development == nil
+        }
     }
 
     public struct Firmware: Equatable {
@@ -55,10 +68,11 @@ public enum Update {
 }
 
 extension Update.Manifest {
-    init(for target: Update.Target, from manifest: FirmwareManifest) throws {
-        release = try manifest.firmware(for: target, channel: .release)
-        candidate = try manifest.firmware(for: target, channel: .candidate)
-        development = try manifest.firmware(for: target, channel: .development)
+    init(for target: Update.Target, from manifest: FirmwareManifest) {
+        // Per channel, so an empty or missing one costs only itself.
+        release = try? manifest.firmware(for: target, channel: .release)
+        candidate = try? manifest.firmware(for: target, channel: .candidate)
+        development = try? manifest.firmware(for: target, channel: .development)
     }
 }
 
