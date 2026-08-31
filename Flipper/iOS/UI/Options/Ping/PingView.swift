@@ -1,0 +1,69 @@
+import Core
+import SwiftUI
+
+struct PingView: View {
+    // next step
+    @StateObject var pingTest = Dependencies.shared.pingTest
+    @Environment(\.dismiss) private var dismiss
+    @State private var entered: String = ""
+
+    var body: some View {
+        VStack(spacing: 20) {
+            HStack {
+                Text("request timestamp: \(pingTest.requestTimestamp)")
+                Spacer()
+            }
+
+            HStack {
+                Text("response timestamp: \(pingTest.responseTimestamp)")
+                Spacer()
+            }
+
+            HStack {
+                Text("time: \(pingTest.time) ms")
+                Spacer()
+            }
+
+            HStack {
+                Text("throughput: \(pingTest.bytesPerSecond) bps")
+                Spacer()
+            }
+
+            HStack {
+                Text("payload size: \(Int(pingTest.payloadSize))")
+                Spacer()
+            }
+
+            Slider(
+                value: $pingTest.payloadSize,
+                in: (0...1024),
+                step: 1
+            ) {
+                Text("Packet size")
+            } minimumValueLabel: {
+                Text("1")
+            } maximumValueLabel: {
+                Text(String(1024))
+            }
+            .padding(.vertical, 30)
+
+            Button("Send ping") {
+                pingTest.sendPing()
+            }
+        }
+        .padding(14)
+        .navigationBarBackground(Color.background)
+        .navigationBarBackButtonHidden(true)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            LeadingToolbarItems {
+                BackButton {
+                    dismiss()
+                }
+            }
+            PrincipalToolbarItems(alignment: .leading) {
+                Title("Ping")
+            }
+        }
+    }
+}

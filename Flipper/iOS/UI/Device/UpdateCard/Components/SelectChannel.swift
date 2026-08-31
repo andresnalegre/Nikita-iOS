@@ -1,0 +1,72 @@
+import Core
+
+import SwiftUI
+
+struct SelectChannel: View {
+    let version: Update.Version
+    let onChannelSelected: (Update.Channel) -> Void
+
+    @State private var showChannelSelector = false
+    @State private var channelSelectorOffset = 0.0
+    @State private var showImport = false
+
+    var body: some View {
+        SelectChannelButton(version: version) {
+            showChannelSelector = true
+        }
+        .fullScreenCover(isPresented: $showImport) {
+            FirmwareImportView()
+        }
+        .background(GeometryReader {
+            Color.clear.preference(
+                key: OffsetKey.self,
+                value: $0.frame(in: .global).origin.y)
+        })
+        .onPreferenceChange(OffsetKey.self) {
+            channelSelectorOffset = $0
+        }
+        .popup(isPresented: $showChannelSelector) {
+            SelectChannelPopup(onChannelSelected: {
+                showChannelSelector = false
+                onChannelSelected($0)
+            }, onImport: {
+                showChannelSelector = false
+                showImport = true
+            })
+            .offset(y: channelSelectorOffset + platformOffset)
+            .padding(.trailing, 14)
+        }
+    }
+}
+
+struct SelectChannelButton: View {
+    let version: Update.Version
+    var action: () -> Void
+
+    public var text: String {
+        switch version.channel {
+        case .development: return "Dev \(version.name)"
+        case .candidate: return "RC \(version.name.dropLast(3))"
+        case .release: return "Release \(version.name)"
+        case .custom: return "Custom"
+        }
+    }
+
+    var body: some View {
+        Button {
+            action()
+        } label: {
+            HStack(spacing: 6) {
+                Spacer()
+
+                Text(text)
+                    .font(.system(size: 14, weight: .regular))
+                    .foregroundColor(version.color)
+
+                Image(systemName: "chevron.down")
+                    .foregroundColor(.black30)
+            }
+            .frame(height: 44)
+        }
+    }
+}
