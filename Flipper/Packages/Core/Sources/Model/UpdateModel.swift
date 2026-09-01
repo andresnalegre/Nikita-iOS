@@ -149,12 +149,29 @@ public class UpdateModel: ObservableObject {
             updateInstalledManifest()
             updateProvisionedRegion()
             updateCurrentRegion()
+            clearStaleUpdatingFrame()
         }
 
         switch state {
         case .update(.progress): break
         default: updateState()
         }
+    }
+
+    // A Flipper left showing the update frame by an older build of this app --
+    // or by any version of it before the frame was ever released -- stays that
+    // way across reconnects, because the virtual display belongs to the device,
+    // not to the session that started it. Nothing else clears it, so a device
+    // could sit stuck on "Update in progress" indefinitely.
+    //
+    // Only when no update is actually running: mid-update that frame is doing
+    // its job.
+    func clearStaleUpdatingFrame() {
+        switch state {
+        case .update: return
+        default: break
+        }
+        Task { await releaseUpdatingFrame() }
     }
 
     func resetFlipperState() {
@@ -379,6 +396,11 @@ public class UpdateModel: ObservableObject {
             return
         }
         updateTaskHandle = Task {
+            // Once the device has been told to reboot into the updater it is
+            // gone, and the frame goes with it. Any other way out of here
+            // leaves the Flipper still running, still showing the frame put up
+            // by prepareForUpdate().
+            var rebooted = false
             do {
                 let bytes = try await downloadFirmware(firmware.url)
                 let bundle = try await UpdateBundle(unpacking: bytes)
@@ -387,11 +409,34 @@ public class UpdateModel: ObservableObject {
                 try await provideRegion()
                 let path = try await uploadFirmware(bundle)
                 try await startUpdateProcess(path)
+                rebooted = true
             } catch {
                 handleInstallError(error)
                 logger.error("update: \(error)")
             }
+            if !rebooted {
+                await releaseUpdatingFrame()
+            }
             updateTaskHandle = nil
+        }
+    }
+
+    // Take the Flipper's screen back.
+    //
+    // showUpdatingFrame() starts a *virtual display*: the phone drives what the
+    // Flipper shows, and the Flipper keeps showing it until told to stop.
+    // hideUpdatingFrame() existed to do that and was never once called, so any
+    // update that did not reach the reboot -- a failed download, no SD card, a
+    // cancel -- left the device frozen on "Update in progress" with no way back
+    // but a reboot. Remote Control mirrors that same screen, which is where it
+    // was seen.
+    private func releaseUpdatingFrame() async {
+        do {
+            try await device.hideUpdatingFrame()
+        } catch {
+            // The device may already be gone, which is fine: the frame goes
+            // with it. Worth a line, never worth failing over.
+            logger.debug("release updating frame: \(error)")
         }
     }
 
@@ -410,6 +455,9 @@ public class UpdateModel: ObservableObject {
     public func cancel() {
         Task {
             state = .update(.result(.canceled))
+            // Before restarting the session, not after: the restart drops the
+            // RPC this has to travel over.
+            await releaseUpdatingFrame()
             device.restartSession()
         }
     }
