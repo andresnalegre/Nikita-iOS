@@ -23,8 +23,25 @@ class FlipperCentral: NSObject, BluetoothCentral {
     // cache to preserve flipper color
     private var services: [UUID: CBUUID] = [:]
 
+    // Scanning is requested before Bluetooth reports itself ready more often
+    // than not -- the user is already on the pairing screen when the radio
+    // finishes waking up -- so the request is remembered and honoured then.
+    private var wantsScan = false
+
     override init() {
         super.init()
+        // Bring CoreBluetooth up now, rather than on first use.
+        //
+        // `manager` is lazy, and the only startup path that touched it was
+        // inside startScanForPeripherals()'s `poweredOn` check -- a state that
+        // cannot change until centralManagerDidUpdateState fires, which cannot
+        // fire until the manager exists. On a fresh install, with no saved
+        // device to connect to, nothing ever broke that circle: the scan
+        // no-opped forever, no device was ever discovered, and iOS never even
+        // asked for Bluetooth permission, because nothing had asked for
+        // Bluetooth. Installs that carried a saved device hid it, since
+        // connect() reaches the manager directly.
+        _ = manager
     }
 
     // MARK: BluetoothCentral & BluetoothConnector
@@ -46,12 +63,14 @@ class FlipperCentral: NSObject, BluetoothCentral {
     }()
 
     func startScanForPeripherals() {
+        wantsScan = true
         if _status.value == .poweredOn {
             manager.scanForPeripherals(withServices: flipperServiceIDs)
         }
     }
 
     func stopScanForPeripherals() {
+        wantsScan = false
         if manager.isScanning {
             manager.stopScan()
             _discovered.value.removeAll()
@@ -115,6 +134,10 @@ extension FlipperCentral: CBCentralManagerDelegate {
 
     func centralManagerDidUpdateState(_ manager: CBCentralManager) {
         _status.value = .init(manager.state)
+        if manager.state == .poweredOn, wantsScan, !manager.isScanning {
+            // Asked for before the radio was ready; start it now.
+            manager.scanForPeripherals(withServices: flipperServiceIDs)
+        }
         if manager.state != .poweredOn {
             _discovered.value.removeAll()
 
