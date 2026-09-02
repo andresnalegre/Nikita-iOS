@@ -2,6 +2,7 @@ public protocol CatalogService {
     func featured() -> FeaturedRequest
 
     func categories() -> CategoriesRequest
+    func sdks() -> SDKsRequest
     func category(_ id: String) -> CategoryRequest
 
     func applications() -> ApplicationsRequest

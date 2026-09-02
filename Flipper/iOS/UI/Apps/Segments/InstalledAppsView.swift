@@ -45,49 +45,53 @@ struct InstalledAppsView: View {
     }
 
     var body: some View {
-        Group {
-            if model.isOutdatedDevice {
-                AppsNotCompatibleFirmware()
-                    .padding(.horizontal, 14)
-            } else {
-                ZStack {
-                    Group {
-                        if model.deviceInfo == nil {
-                            NotConnected()
-                        } else {
-                            NoApps()
-                        }
-                    }
-                    .opacity(noApps ? 1 : 0)
-
-                    ScrollView {
-                        VStack(spacing: 18) {
-                            Group {
-                                if isNetworkIssue {
-                                    NetworkIssue()
-                                } else if outdatedCount > 0 {
-                                    UpdateAllAppButton {
-                                        updateAll()
-                                    }
-                                } else if isLoading {
-                                    UpdateAllAppButton.Placeholder()
-                                }
-                            }
-                            .padding(.horizontal, 14)
-
-                            AppList(
-                                applications: applications,
-                                isInstalled: true,
-                                showPlaceholder: isLoading
-                            )
-                        }
-                        .padding(.vertical, 14)
-                        .opacity(noApps ? 0 : 1)
-                    }
-                    .refreshable(isEnabled: !isLoading) {
-                        reload()
-                    }
+        // Deliberately NOT hidden behind model.isOutdatedDevice.
+        //
+        // These are the apps already on the Flipper's SD card, read over RPC.
+        // The catalog has nothing to do with them, and it is only the catalog
+        // that refuses this firmware -- so hiding this list left a Flipper full
+        // of apps looking empty, with a notice telling its owner to install a
+        // different firmware. Browsing the store is genuinely unavailable and
+        // still says so; what is already installed is shown and can still be
+        // deleted or run.
+        ZStack {
+            Group {
+                if model.deviceInfo == nil {
+                    NotConnected()
+                } else {
+                    NoApps()
                 }
+            }
+            .opacity(noApps ? 1 : 0)
+
+            ScrollView {
+                VStack(spacing: 18) {
+                    Group {
+                        if model.isOutdatedDevice {
+                            AppsCatalogUnavailable()
+                        } else if isNetworkIssue {
+                            NetworkIssue()
+                        } else if outdatedCount > 0 {
+                            UpdateAllAppButton {
+                                updateAll()
+                            }
+                        } else if isLoading {
+                            UpdateAllAppButton.Placeholder()
+                        }
+                    }
+                    .padding(.horizontal, 14)
+
+                    AppList(
+                        applications: applications,
+                        isInstalled: true,
+                        showPlaceholder: isLoading
+                    )
+                }
+                .padding(.vertical, 14)
+                .opacity(noApps ? 0 : 1)
+            }
+            .refreshable(isEnabled: !isLoading) {
+                reload()
             }
         }
     }

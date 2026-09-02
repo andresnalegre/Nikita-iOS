@@ -16,6 +16,10 @@ public class WebCatalog: CatalogService {
         .init(baseURL: baseURL)
     }
 
+    public func sdks() -> SDKsRequest {
+        .init(baseURL: baseURL)
+    }
+
     public func category(_ id: String) -> CategoryRequest {
         .init(baseURL: baseURL, uid: id)
     }

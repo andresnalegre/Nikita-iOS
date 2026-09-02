@@ -119,7 +119,51 @@ public class Applications: ObservableObject {
     private func getDeviceInfo() async throws {
         let target = try await getFlipperTarget()
         let api = try await getFlipperAPI()
-        deviceInfo = .init(target: target, api: api)
+        deviceInfo = .init(
+            target: target,
+            api: await catalogAPI(for: target, reportedBy: api))
+    }
+
+    // What API version to ask the catalog about.
+    //
+    // Normally the device's own. But the catalog only publishes builds for the
+    // official firmware's SDKs and rejects anything else outright (error 1001,
+    // "SDK with `88.4` and `f7` is not exists!"), which is every custom
+    // firmware -- this one included, since it runs ahead of the official
+    // release. That single rejection used to take the whole Apps tab with it.
+    //
+    // So when the device's own SDK is not one the catalog serves, fall back to
+    // the newest one it does. The apps that come back are built against an
+    // older API than the firmware exposes, which is exactly the case the
+    // firmware's loader was taught to accept: this firmware's API is a superset
+    // of the official release's, so their symbols all resolve.
+    //
+    // If the catalog cannot be reached at all, the device's own version is used
+    // unchanged and the usual network handling takes over.
+    private func catalogAPI(
+        for target: String,
+        reportedBy deviceAPI: String
+    ) async -> String {
+        do {
+            let sdks = try await catalog.sdks().get()
+                .filter { $0.target == target && $0.apiVersion.major >= 0 }
+
+            guard !sdks.isEmpty else { return deviceAPI }
+            if sdks.contains(where: { $0.api == deviceAPI }) { return deviceAPI }
+
+            // Prefer the SDK the catalog itself marks as the current release;
+            // otherwise the highest it lists.
+            let newest = sdks.first { $0.isLatestRelease }
+                ?? sdks.max { $0.apiVersion < $1.apiVersion }
+
+            guard let newest else { return deviceAPI }
+            logger.info(
+                "apps: catalog has no SDK \(deviceAPI) for \(target), asking for \(newest.api) instead")
+            return newest.api
+        } catch {
+            logger.error("apps: sdk list: \(error)")
+            return deviceAPI
+        }
     }
 
     private func demoDelay() async {
