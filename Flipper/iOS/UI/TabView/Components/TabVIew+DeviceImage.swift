@@ -2,33 +2,37 @@ import Core
 import SwiftUI
 
 extension TabView {
+    // The Flipper tab's icon, drawn like every other tab's: a single glyph in
+    // whatever colour the bar is tinting it.
+    //
+    // It used to be that glyph sitting inside a Flipper-shaped outline painted
+    // with the connection status -- so this one tab carried a coloured border
+    // no other tab had. The status is already spelled out in the label right
+    // beneath it ("Connected", "Not Connected", "Pairing Failed"), so nothing
+    // is lost by letting the icon match its neighbours.
+    //
+    // The glyphs are authored at 12pt to fit inside that old outline, so they
+    // are scaled to sit at the same weight as the ~22pt icons beside them.
     struct DeviceImage: View {
         let status: Device.Status
-        let style: DeviceBase.Style
 
         private var deviceActionName: String {
             "device_" + status.iconName
         }
 
         var body: some View {
-            ZStack {
-                DeviceBase()
-                    .paint(style: style, status.color)
+            Group {
+                switch status {
+                case .connecting, .synchronizing:
+                    RotatingImage(name: deviceActionName)
 
-                Group {
-                    switch status {
-                    case .connecting, .synchronizing:
-                        RotatingImage(name: deviceActionName)
-
-                    default:
-                        Image(deviceActionName)
-                            .renderingMode(.template)
-                    }
+                default:
+                    Image(deviceActionName)
+                        .renderingMode(.template)
+                        .resizable()
                 }
-                .foregroundColor(style == .fill ? .white : status.color)
-                .offset(x: 1)
             }
-            .frame(width: 42, height: 24)
+            .frame(width: 22, height: 22)
         }
 
         struct RotatingImage: View {
@@ -38,6 +42,7 @@ extension TabView {
             var body: some View {
                 Image(name)
                     .renderingMode(.template)
+                    .resizable()
                     .rotationEffect(.degrees(isAnimating ? 360 : 0))
                     .animation(
                         .linear(duration: 2)

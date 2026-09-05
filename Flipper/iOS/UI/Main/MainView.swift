@@ -1,5 +1,6 @@
 import Core
 import SwiftUI
+import UIKit
 import WidgetKit
 
 struct MainView: View {
@@ -15,7 +16,7 @@ struct MainView: View {
     var body: some View {
         VStack(spacing: 0) {
             ZStack {
-                DeviceView()
+                DeviceView(isActive: selectedTab == .device)
                     .opacity(selectedTab == .device ? 1 : 0)
                 ArchiveView()
                     .opacity(selectedTab == .archive ? 1 : 0)

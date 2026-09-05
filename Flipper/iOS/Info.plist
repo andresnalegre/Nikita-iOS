@@ -81,41 +81,6 @@
 	<string>$(PRODUCT_BUNDLE_PACKAGE_TYPE)</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(MARKETING_VERSION)</string>
-	<key>CFBundleURLTypes</key>
-	<array>
-		<dict>
-			<key>CFBundleTypeRole</key>
-			<string>Viewer</string>
-			<key>CFBundleURLName</key>
-			<string>com.flipperdevices.main</string>
-			<key>CFBundleURLSchemes</key>
-			<array>
-				<string>flipper</string>
-			</array>
-		</dict>
-	</array>
-	<key>CFBundleVersion</key>
-	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>COUNTLY_APP_KEY</key>
-	<string>$(XC_COUNTLY_APP_KEY)</string>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
-	<key>LSRequiresIPhoneOS</key>
-	<true/>
-	<key>LSSupportsOpeningDocumentsInPlace</key>
-	<true/>
-	<key>NFCReaderUsageDescription</key>
-	<string>NFC is required to read tags</string>
-	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>This will allow Flipper app to connect to your Flipper Device</string>
-	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>This will allow Flipper app to connect to your Flipper Device</string>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Save Flipper screen screenshots to your photo library.</string>
-	<key>NSSiriUsageDescription</key>
-	<string>To control Flipper</string>
-	<key>NSSupportsLiveActivities</key>
-	<true/>
 	<key>SENTRY_KEY</key>
 	<string>$(XC_SENTRY_KEY)</string>
 	<key>UIAppFonts</key>

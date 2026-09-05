@@ -98,17 +98,69 @@ public class Applications: ObservableObject {
     @Published public var deviceInfo: DeviceInfo?
     @Published public var isOutdatedDevice: Bool = false
 
+    // Whether the Flipper's API version is known yet, and if so whether it is
+    // one this app can work with. "Not known yet" is a real and common state:
+    // the protobuf version is read over BLE and usually lands a moment AFTER
+    // the connection is reported.
+    private enum APISupport {
+        case unknown
+        case unsupported
+        case supported
+    }
+
+    private var apiSupport: APISupport {
+        guard
+            let information = flipper?.information,
+            information.protobufRevision != .unknown
+        else {
+            return .unknown
+        }
+        return information.protobufRevision >= .v0_17 ? .supported : .unsupported
+    }
+
+    private var deviceInfoTask: Task<Void, Never>?
+
     func onFlipperChanged(_ oldValue: Flipper?) {
-        if oldValue?.state != .connected, flipper?.state == .connected {
-            guard flipper?.hasAPIVersion == true else {
+        // Deliberately not keyed on the disconnected -> connected edge.
+        //
+        // It used to be, and the API version is usually still unread at that
+        // instant, so the check below failed, marked the device outdated and
+        // returned. Nothing ever re-ran it -- the flag was only cleared on
+        // disconnect -- so the Apps tab stayed empty for the rest of the
+        // session, claiming the firmware was unsupported when the app had
+        // simply asked too early. It depended on timing, which is why it
+        // happened on some launches and not others.
+        //
+        // Every update while connected is now considered, and the work is
+        // guarded by deviceInfo/deviceInfoTask so it still runs exactly once.
+        if flipper?.state == .connected {
+            switch apiSupport {
+            case .unknown:
+                // Nothing to conclude yet; another update will arrive.
+                return
+            case .unsupported:
                 isOutdatedDevice = true
                 return
+            case .supported:
+                break
             }
-            Task {
-                try await getDeviceInfo()
-                try await loadInstalled()
+
+            guard deviceInfo == nil, deviceInfoTask == nil else { return }
+            deviceInfoTask = Task {
+                do {
+                    try await getDeviceInfo()
+                    // Reached the device and the catalog agreed on a version:
+                    // whatever an earlier, premature attempt concluded is stale.
+                    isOutdatedDevice = false
+                    try await loadInstalled()
+                } catch {
+                    logger.error("apps: device info: \(error)")
+                }
+                deviceInfoTask = nil
             }
         } else if oldValue?.state == .connected, flipper?.state != .connected {
+            deviceInfoTask?.cancel()
+            deviceInfoTask = nil
             isOutdatedDevice = false
             deviceInfo = nil
             installed = []
@@ -153,7 +205,7 @@ public class Applications: ObservableObject {
 
             // Prefer the SDK the catalog itself marks as the current release;
             // otherwise the highest it lists.
-            let newest = sdks.first { $0.isLatestRelease }
+            let newest = sdks.first { $0.isCurrentRelease }
                 ?? sdks.max { $0.apiVersion < $1.apiVersion }
 
             guard let newest else { return deviceAPI }

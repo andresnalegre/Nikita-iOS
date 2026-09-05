@@ -42,7 +42,6 @@
 		8B6CABEB2C7A06F000341B33 /* KeyQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B6CABEA2C7A06EF00341B33 /* KeyQuery.swift */; };
 		8B7480DE2807483500692304 /* Born2bSportyV2.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 8B7480DD2807483500692304 /* Born2bSportyV2.ttf */; };
 		8B77A9CD26CAA43300A3DF9F /* Core in Frameworks */ = {isa = PBXBuildFile; productRef = 8B77A9CC26CAA43300A3DF9F /* Core */; };
-		AB10000000000000000000A3 /* Nikita in Frameworks */ = {isa = PBXBuildFile; productRef = AB10000000000000000000A2 /* Nikita */; };
 		8B8DEB992BD6EF610051E3D0 /* LiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B8DEB982BD6EF610051E3D0 /* LiveActivity.swift */; };
 		8B8DEB9B2BD6EF960051E3D0 /* Activity in Frameworks */ = {isa = PBXBuildFile; productRef = 8B8DEB9A2BD6EF960051E3D0 /* Activity */; };
 		8BA14F332B14A5DB0026B9E9 /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = 8BA14F322B14A5DB0026B9E9 /* GoogleService-Info.plist */; };
@@ -55,6 +54,7 @@
 		8BD4FC9A2C7A09F600057DB7 /* KeyQuery.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B6CABEA2C7A06EF00341B33 /* KeyQuery.swift */; };
 		8BD4FC9F2C7A279A00057DB7 /* TemplateButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BD4FC9E2C7A279A00057DB7 /* TemplateButton.swift */; };
 		8BF8025C2B0C14670083DF49 /* Notifications in Frameworks */ = {isa = PBXBuildFile; productRef = 8BF8025B2B0C14670083DF49 /* Notifications */; };
+		AB10000000000000000000A3 /* Nikita in Frameworks */ = {isa = PBXBuildFile; productRef = AB10000000000000000000A2 /* Nikita */; };
 		F0DBFA4324EF2F9900EB2880 /* FlipperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F0DBFA1A24EF2F9600EB2880 /* FlipperApp.swift */; };
 		F0DBFA4724EF2F9900EB2880 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F0DBFA1C24EF2F9900EB2880 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
@@ -145,7 +145,6 @@
 		8B7480DD2807483500692304 /* Born2bSportyV2.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; path = Born2bSportyV2.ttf; sourceTree = "<group>"; };
 		8B82A62A2AD49D71007E9E67 /* Macro */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = Macro; path = Packages/Macro; sourceTree = "<group>"; };
 		8B89527A27581E9500E4C336 /* Core */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = Core; path = Packages/Core; sourceTree = "<group>"; };
-		AB10000000000000000000A1 /* Nikita */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = Nikita; path = Packages/Nikita; sourceTree = "<group>"; };
 		8B8DEB972BD6ED210051E3D0 /* Activity */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = Activity; path = Packages/Activity; sourceTree = "<group>"; };
 		8B8DEB982BD6EF610051E3D0 /* LiveActivity.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LiveActivity.swift; sourceTree = "<group>"; };
 		8B906E9B2C74D6990046CAAC /* LiveWidgetExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = LiveWidgetExtension.entitlements; sourceTree = "<group>"; };
@@ -164,6 +163,7 @@
 		8BED6143270B66D8009E51E2 /* perform_lint.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = perform_lint.sh; sourceTree = "<group>"; };
 		8BF074E329C2500700DC688B /* ActivityWidget.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ActivityWidget.entitlements; sourceTree = "<group>"; };
 		8BF8025A2B0C12C10083DF49 /* Notifications */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = Notifications; path = Packages/Notifications; sourceTree = "<group>"; };
+		AB10000000000000000000A1 /* Nikita */ = {isa = PBXFileReference; lastKnownFileType = wrapper; name = Nikita; path = Packages/Nikita; sourceTree = "<group>"; };
 		F0DBFA1A24EF2F9600EB2880 /* FlipperApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlipperApp.swift; sourceTree = "<group>"; };
 		F0DBFA1C24EF2F9900EB2880 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		F0DBFA2124EF2F9900EB2880 /* Flipper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Flipper.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -1152,10 +1152,6 @@
 			isa = XCSwiftPackageProductDependency;
 			productName = Core;
 		};
-		AB10000000000000000000A2 /* Nikita */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = Nikita;
-		};
 		8B8DEB9A2BD6EF960051E3D0 /* Activity */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = Activity;
@@ -1163,6 +1159,10 @@
 		8BF8025B2B0C14670083DF49 /* Notifications */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = Notifications;
+		};
+		AB10000000000000000000A2 /* Nikita */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = Nikita;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

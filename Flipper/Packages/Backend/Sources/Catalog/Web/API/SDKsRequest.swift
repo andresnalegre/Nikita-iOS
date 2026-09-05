@@ -23,7 +23,10 @@ public struct SDK: Decodable, Equatable {
     public let name: String
     public let target: String
     public let api: String
-    public let isLatestRelease: Bool
+    // Null on entries the catalog has not marked either way -- decoding this
+    // as a plain Bool failed the whole list, which left every device falling
+    // back to its own SDK and being rejected again.
+    public let isLatestRelease: Bool?
 
     enum CodingKeys: String, CodingKey {
         case name
@@ -31,6 +34,8 @@ public struct SDK: Decodable, Equatable {
         case api
         case isLatestRelease = "is_latest_release"
     }
+
+    public var isCurrentRelease: Bool { isLatestRelease ?? false }
 }
 
 extension SDK {

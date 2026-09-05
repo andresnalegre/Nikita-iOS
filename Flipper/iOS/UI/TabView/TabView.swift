@@ -135,16 +135,20 @@ private extension TabView {
 }
 
 extension Device.Status {
+    // The healthy states are the brand magenta, not the neon green they used
+    // to be: green sat oddly against this app's palette and read as a stock
+    // "OK" light rather than as part of it. Faults stay red -- that is the one
+    // colour worth keeping literal -- and idle states stay grey.
     var color: Color {
         switch self {
         case .noDevice: .black40
         case .unsupported: .sRed
         case .outdatedMobile: .sRed
         case .connecting: .black40
-        case .connected: .a2
+        case .connected: .a1
         case .disconnected: .black40
-        case .synchronizing: .a2
-        case .synchronized: .a2
+        case .synchronizing: .a1
+        case .synchronized: .a1
         case .updating: .black40
         case .invalidPairing: .sRed
         case .pairingFailed: .sRed
@@ -158,35 +162,29 @@ private extension TabView {
         return device.status.color
     }
 
+    // Selected tabs take the brand accent. They used to resolve to .black30 on
+    // a dark bar -- the same value as the unselected ones -- so which tab you
+    // were on was nearly invisible.
     var archiveColor: Color {
-        guard selected == .archive else { return .black30 }
-        return colorScheme == .light ? .black : .black30
+        selected == .archive ? .a1 : .black30
     }
 
     var remoteColor: Color {
-        guard selected == .remote else { return .black30 }
-        return colorScheme == .light ? .black : .black30
+        selected == .remote ? .a1 : .black30
     }
 
     var appsColor: Color {
-        guard selected == .apps else { return .black30 }
-        return colorScheme == .light ? .black : .black30
+        selected == .apps ? .a1 : .black30
     }
 
     var hubColor: Color {
-        guard selected == .hub else { return .black30 }
-        return colorScheme == .light ? .black : .black30
+        selected == .hub ? .a1 : .black30
     }
 }
 
 private extension TabView {
     var deviceImage: AnyView {
-        .init(
-            DeviceImage(
-                status: device.status,
-                style: selected == .device ? .fill : .stroke
-            )
-        )
+        .init(DeviceImage(status: device.status))
     }
 
     var archiveImage: AnyView {
