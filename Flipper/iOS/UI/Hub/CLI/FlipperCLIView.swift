@@ -28,7 +28,7 @@ final class FlipperCLI: ObservableObject {
     @Published var channel: Channel = .ble
     @Published var history: [String] = []
 
-    let bridge = MachineBridge()
+    let bridge = MachineBridge.shared
     private let device = LiveDeviceBridge()
     private var deps: Core.Dependencies { .shared }
 
@@ -86,13 +86,12 @@ final class FlipperCLI: ObservableObject {
 
     private func runMachine(_ cmd: String) async -> [Line] {
         if cmd == "help" { return [.init(text: machineHelp, kind: .output)] }
-        guard bridge.isConnected else {
-            return [.init(text: "MACHINE channel not connected. Run the bridge "
-                + "on your computer, then: connect ws://<mac-ip>:8765",
-                kind: .error)]
-        }
+        // The bridge is reached through the Flipper's SD card over Bluetooth --
+        // no WebSocket, no WiFi. The phone leaves the command in a mailbox file,
+        // the bridge on the computer picks it up over USB, runs it and leaves
+        // the answer back. See mailboxSend.
         do {
-            let output = try await bridge.run(cmd)
+            let output = try await mailboxSend(cmd)
             return [.init(text: output.isEmpty ? "(no output)" : output,
                           kind: .output)]
         } catch {
@@ -100,11 +99,129 @@ final class FlipperCLI: ObservableObject {
         }
     }
 
+    // MARK: The SD-card mailbox (phone <-> bridge, over Bluetooth)
+
+    private static let mailboxReq = "/ext/nikita/bridge/req"
+    private static let mailboxRes = "/ext/nikita/bridge/res"
+
+    // Leave a command on the card and wait for the matching answer.
+    //
+    // Every request carries an id, and the reply must carry the same one: the
+    // response file may still hold a previous answer when this starts polling,
+    // and taking that would pair a command with the wrong output. So the id is
+    // the handshake -- an answer with a different id is somebody else's, or
+    // stale, and is ignored until the right one lands or the wait runs out.
+    private func mailboxSend(_ command: String) async throws -> String {
+        guard await device.isConnected else {
+            throw MailboxError.noFlipper
+        }
+        let id = String(UInt32.random(in: 1...UInt32.max))
+        // "id.base64(command)" -- one line, only base64 characters. The serial
+        // CLI on the far side mangles spaces and newlines when a file crosses
+        // it, and a shell command is nothing but spaces; base64 has neither, so
+        // it survives the trip whole.
+        let encoded = Data(command.utf8).base64EncodedString()
+        try await device.writeFile(
+            at: Self.mailboxReq, content: id + "." + encoded)
+
+        // Poll for the answer. The bridge polls its side about twice a second,
+        // runs the command, then writes back -- so a second or two is normal,
+        // longer for something slow. Give up after 30s rather than hang.
+        let deadline = Date().addingTimeInterval(30)
+        while Date() < deadline {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            let body: String
+            do {
+                body = try await device.readFile(at: Self.mailboxRes)
+            } catch {
+                continue   // not written yet
+            }
+            let parts = body.trimmingCharacters(in: .whitespacesAndNewlines)
+                .split(separator: ".", maxSplits: 1,
+                       omittingEmptySubsequences: false)
+            guard let head = parts.first, String(head) == id else {
+                continue
+            }
+            try? await device.deleteFile(at: Self.mailboxRes, recursive: false)
+            guard parts.count > 1 else { return "" }
+            // Restore any padding lost in transit and ignore stray bytes: the
+            // "=" tail gets clipped somewhere on the serial hop, and strict
+            // base64 refuses a string that is not a multiple of four. The
+            // content is intact -- only the padding needs putting back.
+            var b64 = String(parts[1])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            while b64.count % 4 != 0 { b64 += "=" }
+            guard let data = Data(base64Encoded: b64,
+                                  options: .ignoreUnknownCharacters) else {
+                return ""
+            }
+            return String(decoding: data, as: UTF8.self)
+        }
+        throw MailboxError.timedOut
+    }
+
+    enum MailboxError: LocalizedError {
+        case noFlipper
+        case timedOut
+        var errorDescription: String? {
+            switch self {
+            case .noFlipper:
+                return "No Flipper over Bluetooth. Connect first."
+            case .timedOut:
+                return "No answer from the bridge. Is nikita-flipper-bridge "
+                    + "running on the computer, with --mailbox?"
+            }
+        }
+    }
+
     // MARK: BLE channel (RPC-mapped commands)
+
+    // The prefix says WHICH MACHINE, not which spelling.
+    //
+    // A bare Unix name is the computer the Flipper is plugged into; the same
+    // verb with an "f" is the Flipper itself. "ls" lists a folder on that
+    // computer, "fls" lists one on the SD card. This is the desktop panel's
+    // rule, and it is the whole reason both spellings exist -- treating them as
+    // twins, which this did at first, threw away the distinction that makes
+    // them useful.
+    //
+    // Verbs that only make sense on one side (screen, btn, unlock, info) need
+    // no prefix: there is nothing on the other machine they could mean.
+    private static let dualVerbs: Set<String> = [
+        "ls", "cat", "tree", "stat", "md5", "mkdir", "rm", "mv", "df",
+        "touch", "echo", "grep", "head", "tail", "wc", "find", "du",
+        "whoami", "open", "close"
+    ]
+
+    // Spellings of the same verb, within one machine.
+    private static func normalise(_ verb: String) -> String {
+        let synonyms = [
+            "dir": "ls", "read": "cat", "del": "rm", "rename": "mv",
+            "hash": "md5", "storage": "df", "press": "btn", "beep": "alert",
+            "power_info": "power", "property": "props", "device_info": "info"
+        ]
+        return synonyms[verb] ?? verb
+    }
 
     private func runBLE(_ line: String) async -> [Line] {
         let parts = line.split(whereSeparator: { $0 == " " }).map(String.init)
-        guard let cmd = parts.first else { return [] }
+        guard let raw = parts.first else { return [] }
+        let verb = Self.normalise(raw)
+
+        // Bare Unix verb: the user means the computer. It travels through the
+        // bridge, because the phone cannot reach that machine any other way.
+        if Self.dualVerbs.contains(verb) {
+            // The computer, reached over the SD mailbox through Bluetooth.
+            // No WebSocket to check -- if the bridge is not running, the
+            // mailbox wait times out and says so.
+            return await runMachine("host " + line)
+        }
+
+        // "f" + a dual verb: the Flipper. Everything below works on the card.
+        let stripped = raw.hasPrefix("f") && raw.count > 1
+            ? Self.normalise(String(raw.dropFirst()))
+            : verb
+        let cmd = Self.dualVerbs.contains(stripped) ? stripped : verb
         let args = Array(parts.dropFirst())
 
         if cmd != "help", !(await device.isConnected) {
@@ -116,7 +233,7 @@ final class FlipperCLI: ObservableObject {
             switch cmd {
             case "help": return [.init(text: bleHelp, kind: .output)]
 
-            case "info", "device_info":
+            case "info":
                 await deps.device.getDeviceInfo()
                 let keys = deps.device.info.keys
                 return keys.isEmpty
@@ -125,14 +242,14 @@ final class FlipperCLI: ObservableObject {
                         .map { "\($0.key): \($0.value)" }
                         .joined(separator: "\n"), kind: .output)]
 
-            case "power", "power_info":
+            case "power":
                 let pairs = try await drainInfo(deps.nikitaSystem.powerInfo())
                 return [.init(text: pairs.isEmpty ? "(no data)"
                     : pairs.sorted { $0.0 < $1.0 }
                         .map { "\($0.0): \($0.1)" }.joined(separator: "\n"),
                     kind: .output)]
 
-            case "props", "property":
+            case "props":
                 let key = args.first ?? ""
                 let pairs = try await drainProps(deps.nikitaSystem.property(key))
                 return [.init(text: pairs.isEmpty ? "(no properties)"
@@ -140,10 +257,10 @@ final class FlipperCLI: ObservableObject {
                         .map { "\($0.0): \($0.1)" }.joined(separator: "\n"),
                     kind: .output)]
 
-            case "ls", "dir": return try await listCmd(args.first ?? "/ext")
+            case "ls": return try await listCmd(args.first ?? "/ext")
             case "tree": return try await treeCmd(args.first ?? "/ext")
 
-            case "cat", "read":
+            case "cat":
                 guard let p = args.first else { return usage("cat <path>") }
                 let text = try await device.readFile(at: p)
                 return [.init(text: text.isEmpty ? "(empty)" : text,
@@ -162,13 +279,13 @@ final class FlipperCLI: ObservableObject {
                 guard let p = args.first else { return usage("mkdir <path>") }
                 try await device.makeDir(at: p); return ok("created \(p)")
 
-            case "rm", "del":
+            case "rm":
                 guard let p = args.first else { return usage("rm <path> [-r]") }
                 let r = args.contains("-r") || args.contains("-rf")
                 try await device.deleteFile(at: p, recursive: r)
                 return ok("deleted \(p)")
 
-            case "mv", "rename":
+            case "mv":
                 guard args.count >= 2 else { return usage("mv <from> <to>") }
                 try await device.renameFile(from: args[0], to: args[1])
                 return ok("\(args[0]) -> \(args[1])")
@@ -179,12 +296,12 @@ final class FlipperCLI: ObservableObject {
                 return [.init(text: "exists: \(i.exists)  type: \(i.type)  "
                     + "size: \(i.size)", kind: .output)]
 
-            case "md5", "hash":
+            case "md5":
                 guard let p = args.first else { return usage("md5 <path>") }
                 let hash = try await deps.nikitaStorage.hash(of: .init(string: p))
                 return [.init(text: "\(hash.value)  \(p)", kind: .output)]
 
-            case "df", "storage":
+            case "df":
                 let path = args.first ?? "/ext"
                 let space = try await deps.nikitaStorage
                     .space(of: .init(string: path))
@@ -196,7 +313,7 @@ final class FlipperCLI: ObservableObject {
             case "screen":
                 return [.init(text: try await device.readScreen(), kind: .output)]
 
-            case "btn", "press":
+            case "btn":
                 guard let b = args.first else {
                     return usage("btn <up|down|left|right|ok|back> [n]")
                 }
@@ -214,7 +331,7 @@ final class FlipperCLI: ObservableObject {
                 try await device.runApp(action: "close", name: nil)
                 return ok("closed app")
 
-            case "alert", "beep":
+            case "alert":
                 try await deps.nikitaGUI.playAlert(); return ok("alert sent")
 
             case "unlock":
@@ -239,6 +356,94 @@ final class FlipperCLI: ObservableObject {
                 try await deps.nikitaSystem.reboot(to: mode)
                 return ok("reboot (\(args.first ?? "os")) sent")
 
+            // Text utilities. The firmware has none of these and has no room
+            // to grow them -- it is an STM32WB55 with 256 KB of RAM -- so the
+            // file is read once over RPC and the work happens on the phone.
+            // Exactly how the desktop does it, for exactly the same reason.
+            case "grep":
+                guard args.count >= 2 else {
+                    return [.init(text: "usage: grep <pattern> <path>",
+                                  kind: .error)]
+                }
+                let pattern = args[0].lowercased()
+                let body = try await device.readFile(at: args[1])
+                let hits = body.split(separator: "\n", omittingEmptySubsequences: false)
+                    .enumerated()
+                    .filter { $0.element.lowercased().contains(pattern) }
+                    .map { "\($0.offset + 1): \($0.element)" }
+                return [.init(
+                    text: hits.isEmpty ? "(no matches)"
+                        : hits.joined(separator: "\n"),
+                    kind: .output)]
+
+            case "head", "tail":
+                guard let path = args.last, !path.isEmpty else {
+                    return [.init(text: "usage: \(cmd) [n] <path>", kind: .error)]
+                }
+                let count = args.count > 1 ? (Int(args[0]) ?? 10) : 10
+                let lines = try await device.readFile(at: path)
+                    .split(separator: "\n", omittingEmptySubsequences: false)
+                let picked = cmd == "head"
+                    ? lines.prefix(count) : lines.suffix(count)
+                return [.init(text: picked.joined(separator: "\n"),
+                              kind: .output)]
+
+            case "wc":
+                guard let path = args.first else {
+                    return [.init(text: "usage: wc <path>", kind: .error)]
+                }
+                let body = try await device.readFile(at: path)
+                let lines = body.split(
+                    separator: "\n", omittingEmptySubsequences: false).count
+                let words = body.split(whereSeparator: { $0.isWhitespace }).count
+                return ok("\(lines) lines, \(words) words, \(body.count) chars")
+
+            case "find":
+                guard args.count >= 2 else {
+                    return [.init(text: "usage: find <path> <name>",
+                                  kind: .error)]
+                }
+                return try await findCmd(args[0], needle: args[1].lowercased())
+
+            case "du":
+                let root = args.first ?? "/ext"
+                let total = try await sizeOf(root)
+                return ok("\(root): \(total) bytes")
+
+            case "touch":
+                guard let path = args.first else {
+                    return [.init(text: "usage: touch <path>", kind: .error)]
+                }
+                try await device.writeFile(at: path, content: "")
+                return ok("created \(path)")
+
+            case "echo":
+                guard args.count >= 2 else {
+                    return [.init(text: "usage: echo <text> <path>",
+                                  kind: .error)]
+                }
+                let text = args.dropLast().joined(separator: " ")
+                try await device.writeFile(at: args[args.count - 1],
+                                           content: text)
+                return ok("wrote \(text.count) chars")
+
+            case "whoami":
+                await deps.device.getDeviceInfo()
+                let name = deps.device.info.keys["hardware_name"] ?? "unknown"
+                return ok(name)
+
+            case "vibro":
+                // No RPC for the motor; the alert does buzz, which is the
+                // honest nearest thing rather than a silent no-op.
+                try await deps.device.playAlert()
+                return ok("buzzed (vibro proper needs the machine channel)")
+
+            case "shutdown":
+                return [.init(
+                    text: "shutdown needs the machine channel: "
+                        + "channel machine, then 'power off'",
+                    kind: .error)]
+
             default:
                 return [.init(text: "unknown BLE command: \(cmd) "
                     + "(type 'help', or 'channel machine' for the raw CLI)",
@@ -247,6 +452,48 @@ final class FlipperCLI: ObservableObject {
         } catch {
             return [.init(text: error.localizedDescription, kind: .error)]
         }
+    }
+
+    // Walk the card looking for a name. Depth-limited: every level is another
+    // round of RPC calls over Bluetooth, and an unbounded walk of /ext takes
+    // long enough to look like a hang.
+    private func findCmd(
+        _ root: String, needle: String, depth: Int = 3
+    ) async throws -> [Line] {
+        var hits: [String] = []
+        func walk(_ path: String, _ level: Int) async {
+            guard level <= depth,
+                  let items = try? await device.listFiles(at: path) else { return }
+            for entry in items {
+                let full = path.hasSuffix("/")
+                    ? path + entry.name : path + "/" + entry.name
+                if entry.name.lowercased().contains(needle) { hits.append(full) }
+                if entry.type == "dir" { await walk(full, level + 1) }
+            }
+        }
+        await walk(root, 1)
+        return [.init(
+            text: hits.isEmpty ? "(no matches)" : hits.joined(separator: "\n"),
+            kind: .output)]
+    }
+
+    private func sizeOf(_ root: String, depth: Int = 3) async throws -> Int {
+        var total = 0
+        func walk(_ path: String, _ level: Int) async {
+            guard level <= depth,
+                  let items = try? await device.listFiles(at: path) else { return }
+            for entry in items {
+                if entry.type == "dir" {
+                    let full = path.hasSuffix("/")
+                        ? path + entry.name : path + "/" + entry.name
+                    await walk(full, level + 1)
+                } else {
+                    total += entry.size
+                }
+            }
+        }
+        await walk(root, 1)
+        return total
     }
 
     private func listCmd(_ path: String) async throws -> [Line] {
@@ -312,43 +559,46 @@ final class FlipperCLI: ObservableObject {
 
     private var bleHelp: String {
         """
-        BLE channel -- RPC-mapped commands:
-        info                 full device_info
-        power                battery / charge info
-        props [key]          system properties
-        ls [path] | tree     list a folder (default /ext)
-        cat <path>           read a file
-        write <path> <text>  write text (\\n = newline)
-        mkdir <path>         make a folder
-        rm <path> [-r]       delete
-        mv <from> <to>       rename / move
-        stat <path>          exists / type / size
-        md5 <path>           file hash
-        df [path]            storage usage
-        screen               screen as ASCII
-        btn <dir> [n]        up/down/left/right/ok/back
-        open <App> / close   launch / exit an app
-        alert                make the Flipper beep
-        unlock               unlock the desktop
-        date | ping          time / round-trip
-        reboot [os|dfu|update]
+        Two machines, one prompt. The prefix picks which.
 
-        channel machine      switch to the raw USB CLI (subghz, nfc, gpio, ...)
-        connect ws://ip:8765 point at the machine bridge
+          ls  /Users/me      the COMPUTER the Flipper is plugged into
+          fls /ext           the FLIPPER itself
+
+        Bare Unix verbs go to the computer, through nikita-flipper-bridge
+        running there. The same verb with an f goes to the Flipper over
+        Bluetooth. Both sides:
+          ls  cat  tree  stat  md5  mkdir  rm  mv  df  touch  echo
+          grep  head  tail  wc  find  du  whoami  open  close
+
+        Flipper only, no prefix needed -- nothing on the computer they
+        could mean:
+          info  power  props  screen  btn <name> [n]  alert  vibro
+          unlock  date  ping  reboot [os|dfu|update]  write <path> <text>
+
+        Text tools run on the phone for the Flipper side: the firmware has no
+        grep and no room to grow one, so the file is read once and filtered
+        here.
+
+        The computer needs nikita-flipper-bridge running on it, plugged to
+        the Flipper by USB. The phone reaches it through the Flipper's SD
+        card over Bluetooth -- no WiFi, no address to type. Start it with:
+          python3 bridge.py --mailbox --allow-host
+
+        channel machine       type straight into the Flipper's own shell
         clear
         """
     }
 
     private var machineHelp: String {
         """
-        MACHINE channel -- the Flipper's REAL text CLI over USB (via the bridge).
-        Anything you type goes straight to the firmware shell. Examples:
+        MACHINE channel -- the Flipper's REAL text CLI, reached through the
+        bridge on the computer. Anything you type goes to the firmware shell:
           device_info        help              storage list /ext
           subghz             nfc               gpio mode PA7 1
           ir rx              led r 255         vibro 1
           js /ext/apps/x.js  ps                free
-        Not connected? Run nikita-flipper-bridge on the computer holding the
-        Flipper on USB, then:  connect ws://<mac-ip>:8765
+        Needs nikita-flipper-bridge running on the computer holding the
+        Flipper, started with --mailbox. No WiFi: it travels the SD card.
         Local: channel ble | clear | disconnect
         """
     }

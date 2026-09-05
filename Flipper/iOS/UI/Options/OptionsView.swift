@@ -144,7 +144,7 @@ struct OptionsView: View {
                 }
             }
             PrincipalToolbarItems(alignment: .leading) {
-                Title("Options")
+                Title("Settings")
             }
         }
         .onChange(of: isDevCatalog) { _ in

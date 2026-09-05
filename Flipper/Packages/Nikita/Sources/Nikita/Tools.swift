@@ -172,13 +172,99 @@ enum NikitaTools {
         ]
     }
 
+    // MARK: Bridge tools -- the Flipper's own shell, and the computer holding it
+    //
+    // These reach past Bluetooth. The phone has no serial line to the Flipper
+    // and no shell of its own, so both go through nikita-flipper-bridge on the
+    // computer that holds the Flipper on USB. That is the same split the
+    // desktop assistant has, arrived at from the other side.
+
+    static var bridgeTools: [[String: Any]] {
+        [
+            function(
+                "run_cli",
+                "Run a command in the Flipper's own text shell, through the "
+                + "bridge on the computer. This is how you reach anything "
+                + "Bluetooth cannot carry: subghz, nfc, gpio, ir, led, vibro, "
+                + "js, i2c. Use the Flipper's real syntax, e.g. "
+                + "'storage list /ext', 'subghz rx', 'gpio mode PA7 1'.",
+                properties: ["command": str("The command, exactly as the "
+                    + "Flipper's shell expects it.")],
+                required: ["command"]),
+            function(
+                "computer_list",
+                "List a folder on the computer the Flipper is plugged into. "
+                + "Use it to see what is on that machine -- the phone has no "
+                + "other way to look.",
+                properties: ["path": str("Absolute path, or ~ for home.")],
+                required: ["path"]),
+            function(
+                "computer_read",
+                "Read a text file on the bridged computer.",
+                properties: ["path": str("Absolute path of the file.")],
+                required: ["path"]),
+            function(
+                "computer_find",
+                "Search the bridged computer for files matching a pattern.",
+                properties: [
+                    "path": str("Folder to search in."),
+                    "pattern": str("Name pattern, e.g. '*.txt'.")
+                ],
+                required: ["path", "pattern"]),
+            function(
+                "computer_write",
+                "Write a text file on the bridged computer, replacing it if it "
+                + "is already there.",
+                properties: [
+                    "path": str("Absolute path of the file."),
+                    "content": str("The full contents to write.")
+                ],
+                required: ["path", "content"]),
+            function(
+                "computer_mkdir",
+                "Create a folder on the bridged computer.",
+                properties: ["path": str("Absolute path of the folder.")],
+                required: ["path"]),
+            function(
+                "computer_delete",
+                "Delete a file or folder on the bridged computer.",
+                properties: [
+                    "path": str("Absolute path to delete."),
+                    "recursive": bool("True to delete a folder and everything "
+                        + "in it.")
+                ],
+                required: ["path"]),
+            function(
+                "computer_run",
+                "Run a terminal command on the bridged computer and return its "
+                + "output. The widest access there is -- prefer a narrower "
+                + "tool when one fits.",
+                properties: ["command": str("The shell command to run.")],
+                required: ["command"])
+        ]
+    }
+
     // Which tool family gates a given tool name (for the access filters).
+    //
+    // Reading, changing and deleting are separate families, on the Flipper and
+    // on the computer alike: they are separate risks and deserve separate
+    // answers. A tool with no family here would be ungated, so the default
+    // lands on the narrowest one rather than the widest.
     static func family(of tool: String) -> String {
         switch tool {
         case "remember", "list_memory", "forget": return "memory"
         case "read_screen": return "screen"
         case "press_button": return "buttons"
         case "run_app": return "apps"
+        case "save_file", "make_dir", "rename_file", "write_file":
+            return "files_write"
+        case "delete_file": return "files_delete"
+        case "run_cli": return "serial"
+        case "computer_list", "computer_read", "computer_find":
+            return "computer_read"
+        case "computer_write", "computer_mkdir": return "computer_write"
+        case "computer_delete": return "computer_delete"
+        case "computer_run": return "computer_run"
         default: return "files"
         }
     }
@@ -186,10 +272,15 @@ enum NikitaTools {
     // The full offered set for a turn, minus families the user switched off.
     static func offered(
         needsDevice: Bool,
+        hasBridge: Bool = false,
         isAllowed: (String) -> Bool
     ) -> [[String: Any]] {
         var all = memoryTools
         if needsDevice { all += deviceTools }
+        // Only when a bridge is actually connected. Offering these to the
+        // model with nothing behind them invites it to promise work it cannot
+        // do and then report a connection error as a result.
+        if hasBridge { all += bridgeTools }
         return all.filter { t in
             guard
                 let fn = t["function"] as? [String: Any],

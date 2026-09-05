@@ -158,7 +158,7 @@ struct DeviceView: View {
                             VStack(spacing: 0) {
                                 NavigationButton(
                                     image: "Options",
-                                    title: "Options",
+                                    title: "Settings",
                                     destination: Destination.options
                                 )
                             }

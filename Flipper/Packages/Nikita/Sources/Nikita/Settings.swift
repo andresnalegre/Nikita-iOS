@@ -36,13 +36,71 @@ public final class NikitaSettings {
 
     // MARK: Access filters -- one switch per tool family, all default on.
 
-    public static let filterableTools: [String] = [
-        "files", "screen", "buttons", "apps", "memory"
+    // One switch per family, in the order the settings screen shows them.
+    // Mirrors the desktop's groups so the same question is asked the same way
+    // in both places: reading, changing and deleting are separate permissions,
+    // because they are separate risks.
+    public struct Family: Sendable {
+        public let id: String
+        public let label: String
+        public let blurb: String
+        // Off unless the user turns it on. Reserved for the ones that reach
+        // past the Flipper -- the computer, and running commands.
+        public let defaultsOff: Bool
+
+        public init(
+            id: String, label: String, blurb: String, defaultsOff: Bool = false
+        ) {
+            self.id = id
+            self.label = label
+            self.blurb = blurb
+            self.defaultsOff = defaultsOff
+        }
+    }
+
+    public static let families: [Family] = [
+        .init(id: "memory", label: "Memory",
+              blurb: "Remember and forget facts about you."),
+        .init(id: "files", label: "Flipper: read",
+              blurb: "List folders and read files on the Flipper."),
+        .init(id: "files_write", label: "Flipper: create and change",
+              blurb: "Write files, create folders and rename on the Flipper."),
+        .init(id: "files_delete", label: "Flipper: delete",
+              blurb: "Delete files and folders on the Flipper."),
+        .init(id: "screen", label: "Flipper: screen",
+              blurb: "Read what is on the Flipper's display."),
+        .init(id: "buttons", label: "Flipper: buttons",
+              blurb: "Press the Flipper's buttons."),
+        .init(id: "apps", label: "Flipper: apps",
+              blurb: "Open and close apps on the Flipper."),
+        .init(id: "serial", label: "Flipper: serial CLI",
+              blurb: "Run the Flipper's own text commands through a bridge on "
+              + "your computer. Reaches sub-GHz, NFC, GPIO and infrared.",
+              defaultsOff: true),
+        .init(id: "computer_read", label: "Computer: read",
+              blurb: "List folders and read files on the bridged computer.",
+              defaultsOff: true),
+        .init(id: "computer_write", label: "Computer: create and change",
+              blurb: "Write files and create folders on the bridged computer.",
+              defaultsOff: true),
+        .init(id: "computer_delete", label: "Computer: delete",
+              blurb: "Delete files and folders on the bridged computer.",
+              defaultsOff: true),
+        .init(id: "computer_run", label: "Computer: run commands",
+              blurb: "Run terminal commands on the bridged computer. The "
+              + "widest access on this list.",
+              defaultsOff: true)
     ]
+
+    public static let filterableTools: [String] = families.map(\.id)
 
     public func isAllowed(_ family: String) -> Bool {
         let key = Keys.filterPrefix + family
-        if defaults.object(forKey: key) == nil { return true }
+        if defaults.object(forKey: key) == nil {
+            // Never asked: the Flipper families are on, anything that reaches
+            // the computer is off until it is switched on deliberately.
+            return !(Self.families.first { $0.id == family }?.defaultsOff ?? false)
+        }
         return defaults.bool(forKey: key)
     }
 

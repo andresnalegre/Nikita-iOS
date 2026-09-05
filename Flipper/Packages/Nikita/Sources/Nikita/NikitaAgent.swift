@@ -15,6 +15,9 @@ public final class NikitaAgent: ObservableObject {
     @Published public private(set) var turnStatus = ""
 
     private let bridge: NikitaDeviceBridge
+    // Optional: no bridge means no shell and no computer tools, which is the
+    // normal state until one is running and connected.
+    private let machine: NikitaMachineBridge?
     private let memory: NikitaMemory
     private let settings: NikitaSettings
 
@@ -27,10 +30,12 @@ public final class NikitaAgent: ObservableObject {
 
     public init(
         bridge: NikitaDeviceBridge,
+        machine: NikitaMachineBridge? = nil,
         memory: NikitaMemory = .init(),
         settings: NikitaSettings = .shared
     ) {
         self.bridge = bridge
+        self.machine = machine
         self.memory = memory
         self.settings = settings
     }
@@ -97,8 +102,10 @@ public final class NikitaAgent: ObservableObject {
             var msgs: [[String: Any]] = [["role": "system", "content": system]]
             msgs += trimmedWire()
 
+            let hasBridge = await (machine?.isBridgeConnected ?? false)
             let tools = NikitaTools.offered(
                 needsDevice: needsTools,
+                hasBridge: hasBridge,
                 isAllowed: { self.settings.isAllowed($0) })
 
             let reply: KimiClient.Reply
@@ -162,6 +169,25 @@ public final class NikitaAgent: ObservableObject {
             + "Tell me the next step and I'll continue.")
     }
 
+    // MARK: Machine bridge
+
+    private func machineRun(_ command: String) async throws -> String {
+        guard let machine, await machine.isBridgeConnected else {
+            throw NikitaDeviceError.failed(
+                "No machine bridge. Run nikita-flipper-bridge on the computer "
+                + "holding the Flipper, and connect to it from the CLI screen.")
+        }
+        let output = try await machine.send(command)
+        return output.isEmpty ? "(no output)" : output
+    }
+
+    // Single-quote a path for the shell. Everything the model supplies is
+    // treated as data, never as syntax: a name with a space or a semicolon in
+    // it must not turn into a second command.
+    private func quoted(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     // MARK: Tool execution
 
     private func execute(
@@ -188,6 +214,49 @@ public final class NikitaAgent: ObservableObject {
                 let match = (args["match"] as? String) ?? ""
                 let n = memory.forget(match)
                 return (jsonOK(["removed": n]), true)
+
+            case "run_cli":
+                let command = (args["command"] as? String) ?? ""
+                return (jsonOK(["output": try await machineRun(command)]), true)
+
+            case "computer_list":
+                let path = (args["path"] as? String) ?? "~"
+                return (jsonOK(["path": path,
+                    "listing": try await machineRun("host ls -la \(quoted(path))")]),
+                    true)
+            case "computer_read":
+                let path = (args["path"] as? String) ?? ""
+                return (jsonOK(["path": path,
+                    "content": try await machineRun("host cat \(quoted(path))")]),
+                    true)
+            case "computer_find":
+                let path = (args["path"] as? String) ?? "~"
+                let pattern = (args["pattern"] as? String) ?? "*"
+                return (jsonOK(["matches": try await machineRun(
+                    "host find \(quoted(path)) -name \(quoted(pattern)) "
+                    + "-maxdepth 4")]), true)
+            case "computer_write":
+                let path = (args["path"] as? String) ?? ""
+                let content = (args["content"] as? String) ?? ""
+                // Through a heredoc so the content is never parsed as shell.
+                let script = "cat > \(quoted(path)) <<'NIKITA_EOF'\n"
+                    + content + "\nNIKITA_EOF"
+                _ = try await machineRun("host \(script)")
+                return (jsonOK(["written": path]), true)
+            case "computer_mkdir":
+                let path = (args["path"] as? String) ?? ""
+                _ = try await machineRun("host mkdir -p \(quoted(path))")
+                return (jsonOK(["created": path]), true)
+            case "computer_delete":
+                let path = (args["path"] as? String) ?? ""
+                let recursive = (args["recursive"] as? Bool) ?? false
+                _ = try await machineRun(
+                    "host rm \(recursive ? "-r " : "")\(quoted(path))")
+                return (jsonOK(["deleted": path]), true)
+            case "computer_run":
+                let command = (args["command"] as? String) ?? ""
+                return (jsonOK(["output": try await machineRun("host \(command)")]),
+                    true)
 
             case "list_files":
                 let path = (args["path"] as? String) ?? "/ext"

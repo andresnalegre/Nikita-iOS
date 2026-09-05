@@ -1,4 +1,5 @@
 import Foundation
+import Nikita
 
 // WebSocket client for the machine bridge (nikita-flipper-bridge running on a
 // computer that holds the Flipper on USB). The bridge exposes the Flipper's
@@ -6,6 +7,11 @@ import Foundation
 // cannot reach. One command in, the full output back as one text frame.
 @MainActor
 final class MachineBridge: ObservableObject {
+    // One connection for the whole app: the CLI screen and Nikita both mean
+    // the same bridge, and connecting twice would be two sockets to the same
+    // serial port.
+    static let shared = MachineBridge()
+
     enum State: Equatable {
         case disconnected
         case connecting
@@ -83,5 +89,18 @@ final class MachineBridge: ObservableObject {
             "Not connected to the machine bridge. Run the bridge on your "
             + "computer and 'connect ws://<mac-ip>:8765'."
         }
+    }
+}
+
+// The assistant's view of the same bridge. Nikita gets the Flipper's shell and
+// the bridged computer through exactly the connection the CLI screen already
+// makes -- one bridge, one address, whichever screen you are on.
+extension MachineBridge: NikitaMachineBridge {
+    public var isBridgeConnected: Bool {
+        get async { await MainActor.run { isConnected } }
+    }
+
+    public func send(_ command: String) async throws -> String {
+        try await run(command)
     }
 }

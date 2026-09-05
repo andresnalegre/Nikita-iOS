@@ -64,15 +64,39 @@ struct NikitaSettingsView: View {
                 .onChange(of: model) { settings.model = $0 }
             }
 
+            // The Flipper itself, over Bluetooth. On by default: this is what
+            // the assistant is for, and none of it leaves the device.
             Section {
-                ForEach(NikitaSettings.filterableTools, id: \.self) { family in
-                    Toggle(label(family), isOn: binding(for: family))
+                ForEach(flipperFamilies, id: \.id) { family in
+                    row(family)
                 }
             } header: {
-                Text("What Nikita may touch")
+                Text("The Flipper")
             } footer: {
                 Text("Turn a family off and Nikita refuses those tools with an "
                      + "honest message instead of using them.")
+            }
+
+            // Everything that reaches past Bluetooth. Off until switched on:
+            // these need nikita-flipper-bridge running on a computer, and they
+            // reach that computer, not just the Flipper.
+            Section {
+                ForEach(bridgeFamilies, id: \.id) { family in
+                    row(family)
+                }
+            } header: {
+                Text("Through the bridge")
+            } footer: {
+                Text("These need nikita-flipper-bridge running on the computer "
+                     + "holding your Flipper on USB. They are off until you "
+                     + "turn them on, and \"run commands\" is a shell on that "
+                     + "computer -- give it out as carefully as you would your "
+                     + "own terminal.")
+            }
+
+            Section {
+                Button("Allow everything") { setAll(true) }
+                Button("Allow nothing", role: .destructive) { setAll(false) }
             }
 
             Section {
@@ -103,14 +127,35 @@ struct NikitaSettingsView: View {
         }
     }
 
-    private func label(_ family: String) -> String {
-        switch family {
-        case "files": return "SD-card files"
-        case "screen": return "Read the screen"
-        case "buttons": return "Press buttons"
-        case "apps": return "Open / close apps"
-        case "memory": return "Remember facts"
-        default: return family.capitalized
+    // Split the way the risk splits: what stays on the Flipper, and what
+    // reaches the computer behind it.
+    private var flipperFamilies: [NikitaSettings.Family] {
+        NikitaSettings.families.filter { !$0.defaultsOff }
+    }
+
+    private var bridgeFamilies: [NikitaSettings.Family] {
+        NikitaSettings.families.filter(\.defaultsOff)
+    }
+
+    @ViewBuilder
+    private func row(_ family: NikitaSettings.Family) -> some View {
+        Toggle(isOn: binding(for: family.id)) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(family.label)
+                // The blurb is the part that says what the switch actually
+                // permits. A label alone ("Computer: run commands") reads as a
+                // feature rather than as a grant.
+                Text(family.blurb)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func setAll(_ on: Bool) {
+        for family in NikitaSettings.families {
+            filters[family.id] = on
+            settings.setAllowed(family.id, on)
         }
     }
 

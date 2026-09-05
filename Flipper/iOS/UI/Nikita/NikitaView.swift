@@ -10,7 +10,11 @@ struct NikitaView: View {
     // with Nikita" from the log viewer hands the log in for analysis).
     var initialMessage: String?
 
-    @StateObject private var agent = NikitaAgent(bridge: LiveDeviceBridge())
+    // The same bridge the CLI screen uses, so a connection made there is one
+    // Nikita can use too.
+    @StateObject private var agent = NikitaAgent(
+        bridge: LiveDeviceBridge(),
+        machine: MachineBridge.shared)
     @State private var draft = ""
     @State private var showSettings = false
     @FocusState private var inputFocused: Bool

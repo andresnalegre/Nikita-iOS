@@ -63,3 +63,21 @@ public enum NikitaDeviceError: LocalizedError {
         }
     }
 }
+
+// The machine bridge, as the assistant sees it.
+//
+// nikita-flipper-bridge runs on the computer holding the Flipper on USB and
+// answers two kinds of question: the Flipper's own text shell -- which
+// Bluetooth cannot carry -- and the computer itself, which the phone has no
+// other way to see. Both arrive here as one call each way.
+//
+// A protocol rather than the concrete client so the agent never depends on
+// WebSockets, the same reason NikitaDeviceBridge exists.
+public protocol NikitaMachineBridge: Sendable {
+    /// True when the bridge is connected and will answer.
+    var isBridgeConnected: Bool { get async }
+
+    /// Send one command, get its whole output. A command prefixed "host " is
+    /// answered by the computer; anything else goes to the Flipper's shell.
+    func send(_ command: String) async throws -> String
+}
