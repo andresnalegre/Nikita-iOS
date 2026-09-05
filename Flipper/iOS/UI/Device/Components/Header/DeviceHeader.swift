@@ -1,13 +1,15 @@
 import Core
+import Peripheral
 import SwiftUI
 
 struct DeviceHeader: View {
     var device: Flipper?
+    var screen: ScreenFrame?
 
     var body: some View {
         VStack {
             if let device = device {
-                DeviceInfoHeader(flipper: device)
+                DeviceInfoHeader(flipper: device, screen: screen)
                     .padding(.top, 4)
                     .padding(.bottom, 12)
                     .padding(.horizontal, 14)
@@ -28,21 +30,28 @@ struct NoDeviceHeader: View {
     let flipper: Flipper?
 
     var body: some View {
-        HStack(spacing: 18) {
+        HStack(spacing: 14) {
+            Spacer(minLength: 0)
+
             FlipperDeviceImage()
                 .flipperColor(flipper?.color)
                 .flipperState(.disabled)
+                .frame(maxWidth: 200)
 
             VStack(alignment: .center, spacing: 6) {
                 Text("No Device")
                     .font(.system(size: 16, weight: .bold))
             }
+            .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
         }
     }
 }
 
 struct DeviceInfoHeader: View {
     let flipper: Flipper
+    var screen: ScreenFrame?
 
     var batteryColor: Color {
         guard let battery = flipper.battery else {
@@ -56,11 +65,20 @@ struct DeviceInfoHeader: View {
         }
     }
 
+    // The device and its details read as one unit, centred together. The image
+    // is resizable and was taking every point the row could give it, which
+    // pushed the name, model and battery hard against the right edge with a
+    // gulf in the middle. Bounding the image and letting the text size to its
+    // own content puts the pair in the middle with a deliberate gap between
+    // them instead.
     var body: some View {
-        HStack(spacing: 18) {
-            FlipperDeviceImage()
+        HStack(spacing: 14) {
+            Spacer(minLength: 0)
+
+            FlipperDeviceImage(screen: screen)
                 .flipperColor(flipper.color)
                 .flipperState(flipper.state == .connected ? .normal : .disabled)
+                .frame(maxWidth: 200)
 
             VStack(alignment: .center, spacing: 6) {
                 Text(flipper.name)
@@ -96,6 +114,9 @@ struct DeviceInfoHeader: View {
                 .opacity(flipper.state == .disconnected ? 0 : 1)
                 .padding(.top, 3)
             }
+            .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity)
     }

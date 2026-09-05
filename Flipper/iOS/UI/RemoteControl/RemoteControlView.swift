@@ -373,16 +373,6 @@ struct RemoteControlView: View {
 }
 
 private extension UIImage {
-    convenience init?(frame: ScreenFrame) {
-        self.init(
-            pixels: frame.pixels.map { $0 ? .black : .orange },
-            width: 128,
-            height: 64
-        )
-    }
-}
-
-private extension UIImage {
     func scaled(by scale: Double) -> UIImage {
         resized(to: .init(
             width: size.width * scale,

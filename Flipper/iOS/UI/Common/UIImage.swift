@@ -1,4 +1,5 @@
 import UIKit
+import Peripheral
 
 public struct PixelColor {
     var a: UInt8
@@ -37,5 +38,18 @@ extension UIImage {
             intent: .defaultIntent)
         else { return nil }
         self.init(cgImage: cgim)
+    }
+}
+
+extension UIImage {
+    // A streamed Flipper screen as an image: 128x64, black on the screen's own
+    // orange. Shared rather than private to the remote control, because the
+    // device header mirrors the same frames.
+    convenience init?(frame: ScreenFrame) {
+        self.init(
+            pixels: frame.pixels.map { $0 ? .black : .orange },
+            width: 128,
+            height: 64
+        )
     }
 }

@@ -2,6 +2,10 @@ import SwiftUI
 
 struct AlertView<Content: View>: View {
     @Binding var isPresented: Bool
+    // Off for alerts whose own button is the only way out, so there are not two
+    // controls that do the same thing. Defaults on, leaving every existing
+    // alert as it was.
+    var showsCloseButton: Bool = true
     let content: Content
 
     @State private var isPresentedAnimated: Bool = false
@@ -17,18 +21,20 @@ struct AlertView<Content: View>: View {
                 .opacity(isPresentedAnimated ? 1 : 0)
 
             VStack(spacing: 0) {
-                HStack {
-                    Spacer()
-                    Button {
-                        isPresented = false
-                    } label: {
-                        Image(systemName: "xmark")
+                if showsCloseButton {
+                    HStack {
+                        Spacer()
+                        Button {
+                            isPresented = false
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.primary)
                     }
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(.primary)
+                    .padding(.top, 19)
+                    .padding(.trailing, 19)
                 }
-                .padding(.top, 19)
-                .padding(.trailing, 19)
 
                 content
                     .padding(.horizontal, 12)
@@ -71,11 +77,13 @@ extension View {
     @ViewBuilder
     func alert<Content: View>(
         isPresented: Binding<Bool>,
+        showsCloseButton: Bool = true,
         @ViewBuilder content: @escaping () -> Content
     ) -> some View {
         self.modifier(OverlayModifier(isPresented: isPresented) {
             AlertView(
                 isPresented: isPresented,
+                showsCloseButton: showsCloseButton,
                 content: content())
         })
     }

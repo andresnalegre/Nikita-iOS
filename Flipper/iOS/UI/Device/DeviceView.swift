@@ -1,8 +1,16 @@
 import Core
 import SwiftUI
+import UIKit
 import Notifications
 
 struct DeviceView: View {
+    // Every tab lives in the same ZStack and only its opacity changes, so
+    // onAppear fires once at launch and onDisappear never fires on a tab
+    // switch. Mirroring was hung on those two, which is why leaving for the
+    // remote control and coming back left the header frozen: nothing told it it
+    // was on screen again. Tab selection is the signal that actually changes.
+    var isActive: Bool = true
+
     @EnvironmentObject var router: Router
     @EnvironmentObject var central: Central
     @EnvironmentObject var device: Device
@@ -12,9 +20,55 @@ struct DeviceView: View {
 
     @Environment(\.scenePhase) var scenePhase
 
+    // The header mirrors the Flipper's screen, which means asking the device to
+    // stream it. Only while this screen is actually in front and the device is
+    // otherwise idle: the stream shares the one BLE link with syncing and
+    // updating, and it is decoration here -- it must never be the reason a
+    // transfer slows down or an update stumbles.
+    @State private var mirrorKeepAlive: Task<Void, Never>?
+
+    private var canMirrorScreen: Bool {
+        device.status == .connected || device.status == .synchronized
+    }
+
+    private func startMirroring() {
+        guard canMirrorScreen else { return }
+        device.startScreenStreaming()
+        startMirrorKeepAlive()
+    }
+
+    private func stopMirroring() {
+        mirrorKeepAlive?.cancel()
+        mirrorKeepAlive = nil
+        device.stopScreenStreaming()
+    }
+
+    // Re-assert the stream every couple of seconds, the same way the remote
+    // control does. A BLE hiccup restarts the RPC session and the Flipper
+    // forgets it was streaming; asking once meant the mirror showed the last
+    // frame that arrived and then sat there, which looked like a screenshot
+    // rather than a screen.
+    private func startMirrorKeepAlive() {
+        mirrorKeepAlive?.cancel()
+        mirrorKeepAlive = Task { @MainActor in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                guard !Task.isCancelled else { break }
+                if isActive, canMirrorScreen, scenePhase == .active {
+                    device.startScreenStreaming()
+                }
+            }
+        }
+    }
+
     @State private var path = NavigationPath()
 
-    @State private var showForgetAction = false
+    // Shown right after forgetting: a notice, not an offer. iOS keeps its own
+    // pairing with the Flipper and no app can remove it -- CoreBluetooth has no
+    // unpair call, and the system pairing list is the user's to edit. So this
+    // says the removal has to be done by hand and opens the one screen where it
+    // can be, rather than implying the app will do it.
+    @State private var showForgetOnPhone = false
     @State private var showOutdatedFirmwareAlert = false
     @State private var showOutdatedMobileAlert = false
 
@@ -70,7 +124,7 @@ struct DeviceView: View {
     var body: some View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
-                DeviceHeader(device: flipper)
+                DeviceHeader(device: flipper, screen: device.frame)
 
                 ScrollView {
                     VStack(spacing: 0) {
@@ -84,17 +138,20 @@ struct DeviceView: View {
                                 .padding(.top, 24)
                                 .padding(.horizontal, 14)
                         default:
-                            if device.status != .noDevice {
-                                DeviceUpdateCard()
-                                    .padding(.top, 24)
-                                    .padding(.horizontal, 14)
-                            }
+                            // Device info first: what the Flipper IS reads
+                            // before what could be done to it, and the update
+                            // card is the one that changes shape the most.
                             NavigationLink(value: Destination.info) {
                                 DeviceInfoCard()
                                     .padding(.top, 24)
                                     .padding(.horizontal, 14)
                             }
                             .disabled(!isDeviceAvailable)
+                            if device.status != .noDevice {
+                                DeviceUpdateCard()
+                                    .padding(.top, 24)
+                                    .padding(.horizontal, 14)
+                            }
                         }
 
                         VStack(spacing: 24) {
@@ -164,7 +221,8 @@ struct DeviceView: View {
                                             image: "Forget",
                                             title: "Forget Flipper"
                                         ) {
-                                            showForgetAction = true
+                                            device.forgetDevice()
+                                            showForgetOnPhone = true
                                         }
                                         .foregroundColor(.sRed)
                                     }
@@ -177,21 +235,6 @@ struct DeviceView: View {
                     }
                 }
                 .background(Color.background)
-                .confirmationDialog(
-                    "Forget Flipper?",
-                    isPresented: $showForgetAction,
-                    titleVisibility: .visible,
-                    presenting: flipper
-                ) { _ in
-                    Button("Forget Flipper", role: .destructive) {
-                        device.forgetDevice()
-                    }
-                } message: { flipper in
-                    Text(
-                        "App will no longer be paired with " +
-                        "Flipper \(flipper.name)"
-                    )
-                }
                 .refreshable(isEnabled: isDeviceAvailable) {
                     updateModel.updateAvailableFirmware()
                 }
@@ -204,6 +247,15 @@ struct DeviceView: View {
                 case .options: OptionsView()
                 }
             }
+        }
+        // Deliberately out here, on the NavigationStack rather than inside the
+        // scroll view. Forgetting flips device.status to .noDevice, which
+        // rebuilds that subtree -- and took the alert down with it the instant
+        // it appeared, so the one thing the user had to read flashed past.
+        // No close button: OK is the only way out, and a second control that
+        // does the same thing invites dismissing the one instruction unread.
+        .alert(isPresented: $showForgetOnPhone, showsCloseButton: false) {
+            RemovePairingAlert(isPresented: $showForgetOnPhone)
         }
         .alert(isPresented: $showOutdatedFirmwareAlert) {
             OutdatedFirmwareAlert(isPresented: $showOutdatedFirmwareAlert)
@@ -222,9 +274,25 @@ struct DeviceView: View {
         }
         .onChange(of: scenePhase) { scenePhase in
             switch scenePhase {
-            case .active: onActive()
-            default: break
+            case .active:
+                onActive()
+                if isActive { startMirroring() }
+            default:
+                // Backgrounded: stop asking for frames nobody can see.
+                stopMirroring()
             }
+        }
+        .onAppear { if isActive { startMirroring() } }
+        .onDisappear { stopMirroring() }
+        .onChange(of: isActive) { active in
+            active ? startMirroring() : stopMirroring()
+        }
+        .onChange(of: device.status) { _ in
+            // Follows the device rather than being set once: the stream cannot
+            // start before there is a connection, and a sync starting is a
+            // reason to get out of the way.
+            guard isActive else { return }
+            canMirrorScreen ? startMirroring() : stopMirroring()
         }
         .task {
             if central.state != .poweredOn {
