@@ -60,12 +60,8 @@ extension URL {
 
     // MARK: Resources
 
-    static var forum = #URL(
-        "https://forum.flipperzero.one"
-    )
-
     static var github = #URL(
-        "https://github.com/flipperdevices"
+        "https://github.com/andresnalegre/Nikita-iOS"
     )
 
     static var bugReport = #URL(

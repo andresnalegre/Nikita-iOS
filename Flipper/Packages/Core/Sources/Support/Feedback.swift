@@ -11,6 +11,19 @@ public class Feedback {
 
     private var logsLimit = 3
 
+    // The same logs the report carries, in a shape usable outside this package:
+    // Attachment is nested in an internal type, so it cannot cross the boundary.
+    public struct LogFile {
+        public let filename: String
+        public let content: String
+    }
+
+    public var logFiles: [LogFile] {
+        get async {
+            await attachments.map { .init(filename: $0.filename, content: $0.content) }
+        }
+    }
+
     private var attachments: [Attachment] {
         get async {
             var result: [Attachment] = []

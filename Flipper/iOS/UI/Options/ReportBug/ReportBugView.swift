@@ -1,8 +1,11 @@
 import Core
 import SwiftUI
+import UIKit
 
 struct ReportBugView: View {
     @Environment(\.dismiss) private var dismiss
+
+    @EnvironmentObject var device: Device
 
     @State var status: Status = .edit
 
@@ -20,7 +23,9 @@ struct ReportBugView: View {
         case edit
         case submit
         case success(String)
-        case failure
+        // Carries why, so the screen can tell "nowhere to send it" apart
+        // from "sending it did not work".
+        case failure(FailureView.Reason)
     }
 
     var body: some View {
@@ -30,10 +35,10 @@ struct ReportBugView: View {
                 EditorView(onSubmit: sendReport)
             case .submit:
                 SubmitView()
-            case .success(let id):
-                SuccessView(id: id)
-            case .failure:
-                FailureView()
+            case .success:
+                SuccessView()
+            case .failure(let reason):
+                FailureView(reason: reason)
             }
         }
         .navigationBarBackground(Color.background)
@@ -51,18 +56,36 @@ struct ReportBugView: View {
         }
     }
 
+    // Submit sends it. No second screen, no mail app, nothing else for the
+    // reporter to do -- and everything they filled in travels with it, plus the
+    // build and device details a report is useless without.
     func sendReport(_ report: Report) {
         Task {
+            status = .submit
             do {
-                status = .submit
-                let id = try await feedback.reportBug(
-                    subject: report.title,
-                    message: report.description,
-                    attachLogs: report.attachLogs)
-                status = .success(id)
+                try await BugReportSender().send(
+                    title: report.title,
+                    description: report.description,
+                    logs: report.attachLogs ? await feedback.logFiles : [],
+                    appVersion: Self.appVersion,
+                    deviceModel: UIDevice.current.model,
+                    firmwareVersion: device.flipper?
+                        .information?.firmwareVersion?.name)
+                status = .success("")
+            } catch BugReportSender.Error.notConfigured {
+                status = .failure(.notConfigured)
+            } catch let BugReportSender.Error.rejected(why) {
+                status = .failure(.failed(why))
             } catch {
-                status = .failure
+                status = .failure(.failed(error.localizedDescription))
             }
         }
+    }
+
+    private static var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(version) (\(build))"
     }
 }

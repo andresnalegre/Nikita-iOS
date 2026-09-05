@@ -2,8 +2,10 @@ import Core
 import Notifications
 
 import SwiftUI
+import UIKit
 
 struct OptionsView: View {
+
     @EnvironmentObject var device: Device
     @EnvironmentObject var archive: ArchiveModel
     @Environment(\.dismiss) private var dismiss
@@ -77,14 +79,6 @@ struct OptionsView: View {
             }
 
             Section {
-                HStack {
-                    Image("ListForum")
-                        .renderingMode(.template)
-                    Link(destination: .forum) {
-                        Text("Forum")
-                            .underline()
-                    }
-                }
                 HStack {
                     Image("ListGitHub")
                         .renderingMode(.template)

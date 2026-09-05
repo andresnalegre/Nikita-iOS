@@ -1,40 +1,34 @@
 import SwiftUI
 
 extension ReportBugView {
+    // What actually went wrong, rather than the stock advice this used to give.
+    //
+    // It said "post your bug on our forum" -- linking to Flipper Devices' forum,
+    // which is not this app's -- and "check the bug in TestFlight", which does
+    // not exist here either. Worse, it read the same whether the report had
+    // been rejected, the network was down, or the app had never been given
+    // anywhere to send to, which is the case that actually keeps coming up.
     struct FailureView: View {
-        @Environment(\.colorScheme) private var colorScheme
+        let reason: Reason
 
-        var placeholderColor: Color {
-            switch colorScheme {
-            case .light: return .black16
-            default: return .black60
-            }
+        enum Reason {
+            case notConfigured
+            case failed(String)
         }
 
-        var text: AttributedString = {
-            var source: AttributedString = """
-                Unable to report bug from the app. Try again later or post \
-                your bug on our forum so we can fix it faster. Here is the \
-                instruction how to do it.
-
-                Check the bug in TestFlight app version. If it doesn’t \
-                reproduce, then we have already fixed it.
-                """
-
-            source.foregroundColor = .black40
-
-            guard let range = source.range(
-                of: "Here is the instruction how to do it."
-            ) else {
-                return source
+        private var message: String {
+            switch reason {
+            case .notConfigured:
+                return "This build has no bug report destination set, so "
+                    + "nothing was sent. That is a setting in the app, not "
+                    + "something you did wrong."
+            case .failed(let why):
+                return why.isEmpty
+                    ? "The report could not be sent. Check your connection "
+                        + "and try again."
+                    : "The report could not be sent: \(why)"
             }
-
-            source[range].foregroundColor = .a2
-            source[range].link = .bugReport
-            source[range].underlineStyle = .single
-
-            return source
-        }()
+        }
 
         var body: some View {
             VStack(spacing: 0) {
@@ -47,10 +41,11 @@ extension ReportBugView {
                 }
                 .padding(.top, 18)
 
-                VStack(spacing: 18) {
-                    Text(text)
-                }
-                .padding(.top, 32)
+                Text(message)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundColor(.black40)
+                    .multilineTextAlignment(.center)
+                    .padding(.top, 32)
 
                 Spacer()
             }
