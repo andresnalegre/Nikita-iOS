@@ -28,13 +28,29 @@ final class FlipperCLI: ObservableObject {
     @Published var channel: Channel = .ble
     @Published var history: [String] = []
 
+    // Where "ls" and a bare command land, one per side. The machine's is
+    // resolved by its own shell (cd there, run, report pwd); the Flipper has no
+    // shell, so the app does the path math for it. Shown in the prompt so you
+    // always know where you are before you look.
+    @Published var machineCwd: String = "~"
+    @Published var flipperCwd: String = "/ext"
+
     let bridge = MachineBridge.shared
     private let device = LiveDeviceBridge()
     private var deps: Core.Dependencies { .shared }
 
+    // The Flipper's name, for the prompt. Filled in once the device answers.
+    @Published var devName: String = "flipper"
+
     init() {
-        emit(.system, "Nikita CLI. Channel: BLE (RPC) / MACHINE (raw USB CLI).")
-        emit(.system, "Type 'help'. Switch with the toggle or 'channel machine'.")
+        Task { await loadName() }
+    }
+
+    private func loadName() async {
+        await deps.device.getDeviceInfo()
+        if let name = deps.device.info.keys["hardware_name"], !name.isEmpty {
+            devName = name
+        }
     }
 
     func clear() {
@@ -83,6 +99,69 @@ final class FlipperCLI: ObservableObject {
     }
 
     // MARK: MACHINE channel (raw firmware CLI over the bridge)
+
+    // The computer, always relative to where you are on it.
+    //
+    // cd is resolved by the machine's own shell -- "cd <here> && cd <there> &&
+    // pwd" moves and reports the new absolute path in one step, which also
+    // proves the target exists. Every other verb runs after a cd into the
+    // current directory, so "ls" with no argument lists where you are and a
+    // relative path means what it says.
+    private func runMachineCwd(verb: String, args: [String]) async -> [Line] {
+        let cwd = Self.shq(machineCwd)
+
+        if verb == "cd" {
+            let target = args.first.map(Self.shq) ?? "~"
+            let out = await runMachineRaw(
+                "cd \(cwd) 2>/dev/null; cd \(target) && pwd")
+            let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if path.hasPrefix("/") {
+                machineCwd = path
+                return []          // moved; the prompt shows the new place
+            }
+            return [.init(text: out.isEmpty ? "cd: no such directory" : out,
+                          kind: .error)]
+        }
+        if verb == "pwd" {
+            let out = await runMachineRaw("cd \(cwd) 2>/dev/null && pwd")
+            return [.init(text: out.isEmpty ? machineCwd : out, kind: .output)]
+        }
+
+        // Everything else runs where you are. A bare ls gets -la so it is
+        // actually useful; a relative path in any verb resolves against cwd.
+        let tail = args.map(Self.shq).joined(separator: " ")
+        let body = (verb == "ls" && args.isEmpty)
+            ? "ls -la"
+            : verb + (tail.isEmpty ? "" : " " + tail)
+        let out = await runMachineRaw("cd \(cwd) 2>/dev/null && " + body)
+        return [.init(text: out.isEmpty ? "(no output)" : out, kind: .output)]
+    }
+
+    private func runMachineRaw(_ shell: String) async -> String {
+        do { return try await mailboxSend("host " + shell) }
+        catch { return error.localizedDescription }
+    }
+
+    // Single-quote for the shell, so a path with a space or a quote is one
+    // argument and never a second command.
+    private static func shq(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
+    // Resolve a Flipper path by hand -- no shell over there to do it. Absolute
+    // stays as is; "." and ".." and plain names fold against the current dir.
+    // Never climbs above /ext or /int: those are the two roots.
+    static func resolveFlipper(_ cwd: String, _ target: String) -> String {
+        let base = target.hasPrefix("/") ? [] : cwd.split(separator: "/").map(String.init)
+        var parts = base
+        for piece in target.split(separator: "/").map(String.init) {
+            if piece == "." || piece.isEmpty { continue }
+            if piece == ".." { if parts.count > 1 { parts.removeLast() }; continue }
+            parts.append(piece)
+        }
+        let path = "/" + parts.joined(separator: "/")
+        return path.isEmpty ? "/ext" : path
+    }
 
     private func runMachine(_ cmd: String) async -> [Line] {
         if cmd == "help" { return [.init(text: machineHelp, kind: .output)] }
@@ -190,7 +269,7 @@ final class FlipperCLI: ObservableObject {
     private static let dualVerbs: Set<String> = [
         "ls", "cat", "tree", "stat", "md5", "mkdir", "rm", "mv", "df",
         "touch", "echo", "grep", "head", "tail", "wc", "find", "du",
-        "whoami", "open", "close"
+        "whoami", "open", "close", "cd", "pwd"
     ]
 
     // Spellings of the same verb, within one machine.
@@ -207,14 +286,12 @@ final class FlipperCLI: ObservableObject {
         let parts = line.split(whereSeparator: { $0 == " " }).map(String.init)
         guard let raw = parts.first else { return [] }
         let verb = Self.normalise(raw)
+        var args = Array(parts.dropFirst())
 
         // Bare Unix verb: the user means the computer. It travels through the
         // bridge, because the phone cannot reach that machine any other way.
         if Self.dualVerbs.contains(verb) {
-            // The computer, reached over the SD mailbox through Bluetooth.
-            // No WebSocket to check -- if the bridge is not running, the
-            // mailbox wait times out and says so.
-            return await runMachine("host " + line)
+            return await runMachineCwd(verb: verb, args: args)
         }
 
         // "f" + a dual verb: the Flipper. Everything below works on the card.
@@ -222,7 +299,27 @@ final class FlipperCLI: ObservableObject {
             ? Self.normalise(String(raw.dropFirst()))
             : verb
         let cmd = Self.dualVerbs.contains(stripped) ? stripped : verb
-        let args = Array(parts.dropFirst())
+
+        // fcd / fpwd navigate the Flipper the way cd / pwd navigate the machine.
+        // The Flipper has no shell, so the path math is done here.
+        if cmd == "cd" {
+            let target = args.first ?? "/ext"
+            let dest = Self.resolveFlipper(flipperCwd, target)
+            if (try? await device.listFiles(at: dest)) != nil {
+                flipperCwd = dest
+                return []
+            }
+            return [.init(text: "fcd: no such directory: \(dest)", kind: .error)]
+        }
+        if cmd == "pwd" {
+            return [.init(text: flipperCwd, kind: .output)]
+        }
+        // A bare fls lists where you are; a relative path resolves against it.
+        if args.isEmpty, cmd == "ls" || cmd == "tree" {
+            args = [flipperCwd]
+        } else if let first = args.first, !first.hasPrefix("/") {
+            args[0] = Self.resolveFlipper(flipperCwd, first)
+        }
 
         if cmd != "help", !(await device.isConnected) {
             return [.init(text: "No Flipper connected over Bluetooth.",
@@ -696,8 +793,36 @@ struct FlipperCLIView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // The same prompt nikita-qflipper shows: the device name, where you are on
+    // the computer, and -- only when you have moved off the card's root -- where
+    // you are on the Flipper. "~" for home and for /ext, the way a shell does.
     private var prompt: String {
-        cli.channel == .machine ? "flipper(usb)> " : "flipper> "
+        let host = Self.tildeHome(cli.machineCwd)
+        let flip = cli.flipperCwd == "/ext"
+            ? ""
+            : "[f:" + Self.tildeExt(cli.flipperCwd) + "]"
+        return "\(cli.devName)@qflipper \(host)\(flip) % "
+    }
+
+    private static func tildeHome(_ path: String) -> String {
+        if path == "~" || path.hasPrefix("~") { return path }
+        // The machine reports absolute home paths; fold the obvious ones to ~.
+        for marker in ["/Users/", "/home/"] {
+            if let r = path.range(of: marker) {
+                let after = path[r.upperBound...]
+                if let slash = after.firstIndex(of: "/") {
+                    return "~" + after[slash...]
+                }
+                return "~"
+            }
+        }
+        return path
+    }
+
+    private static func tildeExt(_ path: String) -> String {
+        if path == "/ext" { return "~" }
+        if path.hasPrefix("/ext/") { return "~" + path.dropFirst(4) }
+        return path
     }
 
     private var inputBar: some View {
@@ -707,7 +832,7 @@ struct FlipperCLIView: View {
                 .foregroundColor(.a2)
                 .lineLimit(1)
                 .fixedSize()
-            TextField("command", text: $input)
+            TextField("", text: $input)
                 .font(.system(.caption, design: .monospaced))
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
