@@ -15,6 +15,11 @@ public class UpdateModel: ObservableObject {
 
     @Published public var manifest: Update.Manifest?
     @Published public var customFirmware: Update.Firmware?
+    // True when the chosen custom firmware is a newer build of the SAME
+    // firmware the Flipper is already running, rather than a switch to a
+    // different one. Both travel the custom channel, but they are not the same
+    // act, and the card should not call an update an install.
+    @Published public var customIsSameFirmware = false
     @Published public var updateChannel: Update.Channel = .load() {
         didSet {
             if updateChannel != .custom {
@@ -134,6 +139,31 @@ public class UpdateModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { _ in self.updateState() }
             .store(in: &cancellables)
+
+        // device_info arrives after the connection settles, and the version
+        // comes with $flipper. Either can be what finally names the firmware,
+        // so both are watched: a flash to a different one has to send the card
+        // to a different feed, or it keeps offering the previous firmware's
+        // releases.
+        device.$info
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if self.followInstalledFirmware() {
+                    self.updateAvailableFirmware()
+                }
+            }
+            .store(in: &cancellables)
+
+        device.$flipper
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                if self.followInstalledFirmware() {
+                    self.updateAvailableFirmware()
+                }
+            }
+            .store(in: &cancellables)
     }
 
     func onStateChanged(_ oldValue: State) {
@@ -236,7 +266,35 @@ public class UpdateModel: ObservableObject {
         }
     }
 
+    // Point the feed at whatever firmware the device is running, before asking
+    // it anything. Returns true when the stream changed, so a stale manifest
+    // from the previous firmware can be dropped rather than shown for the
+    // moment it takes the new one to arrive.
+    // What the device says it is running, by fork if it reports one and by the
+    // shape of its version otherwise.
+    public var installedFirmware: FirmwareIdentity? {
+        FirmwareIdentity.identify(
+            fork: device.info.keys["firmware_origin_fork"],
+            version: device.flipper?.information?.firmwareVersion?.name)
+    }
+
+    @discardableResult
+    func followInstalledFirmware() -> Bool {
+        guard let url = installedFirmware?.manifestURL else {
+            // A fork with no directory.json of its own. Leave the feed where it
+            // is rather than pointing it at somebody else's releases; the card
+            // reports what it has and offers no update it cannot justify.
+            return false
+        }
+        guard url != FirmwareFeed.current else { return false }
+        FirmwareFeed.current = url
+        manifest = nil
+        customIsSameFirmware = false
+        return true
+    }
+
     public func updateAvailableFirmware() {
+        followInstalledFirmware()
         switch state {
         case .update(.progress): return
         case .update(.result(.started)): return
@@ -366,7 +424,12 @@ public class UpdateModel: ObservableObject {
             return false
         }
         guard installed.channel == updateChannel else {
-            state = .ready(.channelUpdate)
+            // Changing firmware is an install; taking a newer build of the one
+            // already on the device is an update, whichever channel carries it.
+            state = .ready(
+                updateChannel == .custom && customIsSameFirmware
+                    ? .versionUpdate
+                    : .channelUpdate)
             return false
         }
         return true

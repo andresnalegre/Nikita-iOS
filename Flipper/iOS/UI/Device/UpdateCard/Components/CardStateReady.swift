@@ -49,7 +49,11 @@ extension DeviceUpdateCard {
 
                 Divider()
 
-                if updateChannel == .custom {
+                // "Choose a file" only while there is nothing chosen. An
+                // import from the store has already picked the firmware, so
+                // what is left to do is install it -- the card used to keep
+                // asking for a file and there was no way to act on the import.
+                if updateChannel == .custom, updateModel.customFirmware == nil {
                     ChooseFileButton {
                         showFileImporter = true
                     }
@@ -106,6 +110,10 @@ extension DeviceUpdateCard {
         func customUpdateFileChosen(_ url: URL) {
             if let firmware = Update.Firmware(decodingFileURL: url) {
                 updateChannel = .custom
+                // A hand-picked file is an unknown quantity: nothing here can
+                // say it is a newer build of what is running, so it must not
+                // inherit that claim from a previous import.
+                updateModel.customIsSameFirmware = false
                 updateModel.customFirmware = firmware
                 startUpdate()
             }
@@ -114,6 +122,7 @@ extension DeviceUpdateCard {
         func customUpdateURLChosen(_ url: URL) {
             if let firmware = Update.Firmware(decodingWebURL: url) {
                 updateChannel = .custom
+                updateModel.customIsSameFirmware = false
                 updateModel.customFirmware = firmware
                 startUpdate()
             }

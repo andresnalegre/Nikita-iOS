@@ -18,7 +18,9 @@ struct RemoteFirmwareManifestSource: FirmwareManifestSource {
     func get(
         progress: @escaping (Double) -> Void
     ) async throws -> FirmwareManifest {
-        let data = URLSessionData(from: .firmwareManifestURL) {
+        // FirmwareFeed.current, not a constant: whichever firmware is on the
+        // device is the one whose releases this card should be reporting.
+        let data = URLSessionData(from: FirmwareFeed.current) {
             progress($0.fractionCompleted)
         }
         return try await JSONDecoder().decode(

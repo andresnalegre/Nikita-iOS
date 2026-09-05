@@ -3,8 +3,21 @@ import Core
 import SwiftUI
 
 struct SelectChannel: View {
+    @EnvironmentObject var updateModel: UpdateModel
+
     let version: Update.Version
     let onChannelSelected: (Update.Channel) -> Void
+
+    // Read off the feed rather than assumed: a channel is on the menu only if
+    // it has a build in it.
+    private var availableChannels: [Update.Channel] {
+        guard let manifest = updateModel.manifest else { return [] }
+        var out: [Update.Channel] = []
+        if manifest.release != nil { out.append(.release) }
+        if manifest.candidate != nil { out.append(.candidate) }
+        if manifest.development != nil { out.append(.development) }
+        return out
+    }
 
     @State private var showChannelSelector = false
     @State private var channelSelectorOffset = 0.0
@@ -26,7 +39,7 @@ struct SelectChannel: View {
             channelSelectorOffset = $0
         }
         .popup(isPresented: $showChannelSelector) {
-            SelectChannelPopup(onChannelSelected: {
+            SelectChannelPopup(available: availableChannels, onChannelSelected: {
                 showChannelSelector = false
                 onChannelSelected($0)
             }, onImport: {
@@ -48,7 +61,14 @@ struct SelectChannelButton: View {
         case .development: return "Dev \(version.name)"
         case .candidate: return "RC \(version.name.dropLast(3))"
         case .release: return "Release \(version.name)"
-        case .custom: return "Custom"
+        // Once something has been imported, its name is the useful label --
+        // "Custom" named the mechanism rather than the firmware, so a row that
+        // had just been chosen from the store gave no sign of which one it was.
+        // Before an import there is nothing to name, so the word stands.
+        case .custom:
+            return version.name.isEmpty || version.name == "unknown"
+                ? "Custom"
+                : version.name
         }
     }
 

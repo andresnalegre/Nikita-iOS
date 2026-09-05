@@ -36,6 +36,12 @@ final class FirmwareCatalog: ObservableObject {
 
     @Published var channel: [UUID: String] = [:]
     @Published var status: [UUID: Status] = [:]
+    // Which channels a source is actually publishing on, learned from the feed
+    // rather than declared up front. `channels` below is only what a source
+    // COULD publish; several of them only ever ship one stream, and offering a
+    // picker for streams that are empty is how Nikita ended up appearing to
+    // have an rc and a dev build it has never cut.
+    @Published var liveChannels: [UUID: [String]] = [:]
 
     // Nikita first: this is the Nikita app, so its own firmware is the default
     // offer here as it is on the update card. Everything under it is what
@@ -75,6 +81,22 @@ final class FirmwareCatalog: ObservableObject {
         channel[source.id] ?? source.defaultChannel
     }
 
+    // Until the feed has been read, only the default is offered. The declared
+    // list used to stand in, which meant a source briefly advertised streams it
+    // might not have and then quietly lost them a moment later.
+    func channelsFor(_ source: FirmwareSource) -> [String] {
+        let live = liveChannels[source.id] ?? []
+        return live.isEmpty ? [source.defaultChannel] : live
+    }
+
+    // A default that turned out not to exist is not a choice the user made, so
+    // it gives way to whatever the feed does carry.
+    func effectiveChannel(_ source: FirmwareSource) -> String {
+        let live = channelsFor(source)
+        let current = channelFor(source)
+        return live.contains(current) ? current : (live.first ?? current)
+    }
+
     func setChannel(_ source: FirmwareSource, _ value: String) {
         channel[source.id] = value
         Task { await resolve(source) }
@@ -112,23 +134,61 @@ final class FirmwareCatalog: ObservableObject {
         guard
             let root = try JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
-            let channels = root["channels"] as? [[String: Any]],
-            let ch = channels.first(where: { ($0["id"] as? String) == wanted }),
-            let versions = ch["versions"] as? [[String: Any]]
+            let channels = root["channels"] as? [[String: Any]]
         else { throw Err.notFound }
+
+        // The channel asked for, or -- when this feed does not carry it -- the
+        // first one that has anything in it. A remembered pick can outlive the
+        // stream it named, and a feed that reads fine should not report itself
+        // as missing over that.
+        let nonEmpty = { (e: [String: Any]) -> Bool in
+            !(((e["versions"] as? [[String: Any]]) ?? []).isEmpty)
+        }
+        guard
+            let ch = channels.first(where: {
+                ($0["id"] as? String) == wanted && nonEmpty($0)
+            }) ?? channels.first(where: nonEmpty),
+            let versions = ch["versions"] as? [[String: Any]]
+        else { throw Err.noReleases }
+
+        // The whole feed is in hand, so note which streams are real while we
+        // are here. Read off the feed rather than filtered against the list
+        // declared above: that list is a guess made here, and Official's guess
+        // of release+dev hid the release-candidate its feed actually carries.
+        // What a firmware publishes is the firmware's business, and it changes
+        // as builds are tagged. A channel present but empty does not count.
+        let order = ["release", "rc", "dev"]
+        let found = channels.compactMap { entry -> String? in
+            guard
+                let id = entry["id"] as? String,
+                !(((entry["versions"] as? [[String: Any]]) ?? []).isEmpty)
+            else { return nil }
+            return shortChannel(id)
+        }
+        liveChannels[source.id] = order.filter { found.contains($0) }
+
         guard let latest = versions.first else { throw Err.noReleases }
 
         let version = (latest["version"] as? String) ?? "?"
         let ts = (latest["timestamp"] as? Double)
             ?? (latest["timestamp"] as? Int).map(Double.init)
+        // Match on the FILE NAME, never the whole URL. A feed lists several f7
+        // tgz files per version -- appsymbols, debugapps, resources, update --
+        // and only the last is a firmware bundle. Testing the URL for "update"
+        // matched every one of Official's, whose host IS update.flipperzero.one,
+        // so the first f7 entry won and the app cheerfully flashed the app
+        // symbols archive: a few seconds of "updating" and a Flipper still on
+        // the firmware it started with.
+        //
+        // No blind fallback to "any tgz" either, for the same reason -- picking
+        // the wrong archive is worse than saying the bundle is missing.
         let files = (latest["files"] as? [[String: Any]]) ?? []
-        guard let tgz = files.first(where: {
-            let target = ($0["target"] as? String) ?? ""
-            let urlStr = ($0["url"] as? String) ?? ""
-            return target == "f7" && urlStr.hasSuffix(".tgz")
-                && urlStr.contains("update")
-        }) ?? files.first(where: {
-            ($0["url"] as? String)?.hasSuffix(".tgz") ?? false
+        guard let tgz = files.first(where: { f in
+            let target = (f["target"] as? String) ?? ""
+            let name = URL(string: (f["url"] as? String) ?? "")?
+                .lastPathComponent.lowercased() ?? ""
+            return target == "f7" && name.hasSuffix(".tgz")
+                && name.contains("update")
         }), let tgzURL = URL(string: (tgz["url"] as? String) ?? "") else {
             throw Err.noBundle
         }
@@ -151,6 +211,22 @@ final class FirmwareCatalog: ObservableObject {
             as? [[String: Any]] else { throw Err.notFound }
 
         guard !releases.isEmpty else { throw Err.noReleases }
+
+        // "dev" is only a stream of its own when the newest build is not also
+        // the newest stable one. A repo that never marks a prerelease -- ARF
+        // tags everything dev, Xero everything stable -- has one stream, and
+        // saying otherwise offers a switch that changes nothing.
+        let newest = releases.first
+        let newestStable = releases.first(where: {
+            ($0["prerelease"] as? Bool) == false
+        })
+        var live: [String] = []
+        if newestStable != nil { live.append("release") }
+        if newestStable == nil ||
+            (newest?["tag_name"] as? String) != (newestStable?["tag_name"] as? String) {
+            live.append("dev")
+        }
+        liveChannels[source.id] = source.channels.filter { live.contains($0) }
 
         // release channel -> first non-prerelease; dev -> newest of any kind.
         let picked = wantDev
@@ -198,6 +274,18 @@ final class FirmwareCatalog: ObservableObject {
         }
     }
 
+    // Feed id -> the short label the rows show. Unknown ids are dropped rather
+    // than lumped in with release: a stream nobody here can name is not one to
+    // offer a switch to.
+    private func shortChannel(_ id: String) -> String? {
+        switch id {
+        case "release": return "release"
+        case "release-candidate": return "rc"
+        case "development": return "dev"
+        default: return nil
+        }
+    }
+
     private func channelId(_ channel: String) -> String {
         switch channel {
         case "dev": return "development"
@@ -222,8 +310,25 @@ final class FirmwareCatalog: ObservableObject {
 
 struct FirmwareImportView: View {
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var device: Device
     @StateObject private var catalog = FirmwareCatalog()
     @State private var confirming: (FirmwareSource, ResolvedFirmware)?
+
+    private var installedVersion: String? {
+        device.flipper?.information?.firmwareVersion?.name
+    }
+
+    // The same identification the update card uses, so the two screens can
+    // never disagree about which firmware is on the device.
+    private var installed: FirmwareIdentity? {
+        FirmwareIdentity.identify(
+            fork: device.info.keys["firmware_origin_fork"],
+            version: installedVersion)
+    }
+
+    private func isInstalled(_ source: FirmwareSource) -> Bool {
+        installed?.displayName == source.name
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -233,7 +338,10 @@ struct FirmwareImportView: View {
                     ForEach(catalog.sources) { source in
                         FirmwareRow(
                             source: source,
-                            channel: catalog.channelFor(source),
+                            isInstalled: isInstalled(source),
+                            installedVersion: installedVersion,
+                            channel: catalog.effectiveChannel(source),
+                            channels: catalog.channelsFor(source),
                             status: catalog.status[source.id] ?? .idle,
                             onChannel: { catalog.setChannel(source, $0) },
                             onImport: { resolved in
@@ -248,20 +356,21 @@ struct FirmwareImportView: View {
         .background(Color.background)
         .onAppear { catalog.resolveAll() }
         .alert(
-            "Flash \(confirming?.0.name ?? "") \(confirming?.1.version ?? "")?",
+            "Use \(confirming?.0.name ?? "") \(confirming?.1.version ?? "")?",
             isPresented: .init(
                 get: { confirming != nil },
                 set: { if !$0 { confirming = nil } })
         ) {
             Button("Cancel", role: .cancel) { confirming = nil }
-            Button("Flash", role: .destructive) {
+            Button("Select") {
                 if let (source, resolved) = confirming {
                     startImport(source: source, resolved: resolved)
                 }
                 confirming = nil
             }
         } message: {
-            Text("Flashing replaces the firmware currently on your Flipper.")
+            Text("This becomes the firmware the update card offers. "
+                 + "Nothing is written to your Flipper until you press INSTALL.")
         }
     }
 
@@ -294,6 +403,14 @@ struct FirmwareImportView: View {
         .padding(.vertical, 12)
     }
 
+    // Importing SELECTS a firmware; it does not flash it. Calling install()
+    // from here went straight past the charge and sync checks, past the
+    // confirmation, and past DeviceUpdateView -- the screen that shows the
+    // progress and owns the Flipper's updating frame. The sheet then closed
+    // over a flash happening with nothing on screen to say so, and a failure
+    // had nowhere to appear at all. Picking it puts the update card into
+    // channelUpdate, which is the card's own INSTALL button, and that runs the
+    // normal path.
     private func startImport(
         source: FirmwareSource, resolved: ResolvedFirmware
     ) {
@@ -303,15 +420,19 @@ struct FirmwareImportView: View {
             changelog: "\(source.name) \(resolved.version)",
             url: resolved.url)
         deps.updateModel.customFirmware = firmware
+        // Same firmware, newer build: the card should offer UPDATE, not INSTALL.
+        deps.updateModel.customIsSameFirmware = isInstalled(source)
         deps.updateModel.updateChannel = .custom
-        deps.updateModel.install(firmware)
         dismiss()
     }
 }
 
 private struct FirmwareRow: View {
     let source: FirmwareSource
+    let isInstalled: Bool
+    let installedVersion: String?
     let channel: String
+    let channels: [String]
     let status: FirmwareCatalog.Status
     let onChannel: (String) -> Void
     let onImport: (ResolvedFirmware) -> Void
@@ -330,9 +451,9 @@ private struct FirmwareRow: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 6) {
-                if source.channels.count > 1 {
+                if channels.count > 1 {
                     Menu {
-                        ForEach(source.channels, id: \.self) { ch in
+                        ForEach(channels, id: \.self) { ch in
                             Button(ch) { onChannel(ch) }
                         }
                     } label: {
@@ -364,16 +485,16 @@ private struct FirmwareRow: View {
             Button {
                 if case .ready(let r) = status { onImport(r) }
             } label: {
-                Text("IMPORT")
+                Text(actionTitle)
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundColor(isReady ? .a1 : .black30)
+                    .foregroundColor(actionColor)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .overlay(RoundedRectangle(cornerRadius: 8)
-                        .stroke(isReady ? Color.a1 : Color.black20,
+                        .stroke(isEnabled ? actionColor : Color.black20,
                                 lineWidth: 1))
             }
-            .disabled(!isReady)
+            .disabled(!isEnabled)
         }
         .padding(12)
         .background(Color.groupedBackground)
@@ -385,6 +506,38 @@ private struct FirmwareRow: View {
     private var isReady: Bool {
         if case .ready = status { return true }
         return false
+    }
+
+    // The version this row is offering, once it has resolved.
+    private var offered: String? {
+        if case .ready(let r) = status { return r.version }
+        return nil
+    }
+
+    // Already on this firmware, at exactly this build. Nothing to do.
+    private var isUpToDate: Bool {
+        guard isInstalled, let offered, let installedVersion else { return false }
+        return offered.caseInsensitiveCompare(installedVersion) == .orderedSame
+    }
+
+    // "Import" is the word for taking a firmware you are not running. On the
+    // one you ARE running there is nothing to bring in, so it reads UPDATE --
+    // and it keeps reading UPDATE whether or not one is available. The state
+    // lives in the colour rather than in the word: grey and inert while the
+    // device is current, green and live the moment a newer build appears.
+    // A label that changes to "UP TO DATE" says the same thing twice and makes
+    // the row jump about as feeds resolve.
+    private var actionTitle: String {
+        isInstalled ? "UPDATE" : "IMPORT"
+    }
+
+    private var isEnabled: Bool {
+        isReady && !isUpToDate
+    }
+
+    private var actionColor: Color {
+        guard isEnabled else { return .black30 }
+        return isInstalled ? .sGreenUpdate : .a1
     }
 
     @ViewBuilder
