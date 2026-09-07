@@ -133,18 +133,14 @@ enum NikitaTools {
                 properties: ["path": str("Absolute path on the Flipper to stat")],
                 required: ["path"]),
             function(
-                "read_screen",
-                "See what is on the Flipper's screen RIGHT NOW, rendered as text/ASCII "
-                + "straight from the framebuffer. Use it to VERIFY where you are "
-                + "before and after pressing buttons -- you are NOT blind when you "
-                + "call this."),
-            function(
                 "press_button",
-                "Press a button on the Flipper over Bluetooth. This is the way to "
-                + "drive the device on a wireless link -- there is no CLI here. "
-                + "up/down/left/right move the selection, ok enters/confirms, back "
-                + "leaves. Do not press blind: read_screen first, move once, then "
-                + "look again. A count is never evidence of position.",
+                "Press a button on the Flipper over Bluetooth. There is no screen "
+                + "feedback -- you are pressing BLIND -- so use it only for a known, "
+                + "deterministic action (unlock, confirm a dialog you are sure is up, "
+                + "a fixed sequence). To OPEN an app use run_app, not button "
+                + "navigation; to read the device use files (list_files/read_file) or "
+                + "the CLI. up/down/left/right move the selection, ok enters/confirms, "
+                + "back leaves.",
                 properties: [
                     "button": str(
                         "Which button to tap",
@@ -161,7 +157,7 @@ enum NikitaTools {
                 + "under /ext/apps/<Category>/) pass its FULL .fap PATH as the name. "
                 + "Do NOT guess a name from a vague word -- if unsure, ask, or treat "
                 + "it as a folder and use list_files. When it succeeds the app IS "
-                + "open; do not then read_screen just to check.",
+                + "open -- say so and stop.",
                 properties: [
                     "action": str(
                         "open to launch an app, close to return to desktop",
@@ -240,7 +236,32 @@ enum NikitaTools {
                 + "output. The widest access there is -- prefer a narrower "
                 + "tool when one fits.",
                 properties: ["command": str("The shell command to run.")],
-                required: ["command"])
+                required: ["command"]),
+            function(
+                "transfer",
+                "Copy a file BETWEEN the two machines, binary-safe and "
+                + "MD5-verified. The paths decide the direction: a Flipper path "
+                + "starts with /ext or /int, anything else is the computer. So "
+                + "src /ext/subghz/x.sub, dst ~/Desktop pulls it to the Mac; the "
+                + "other way pushes. Use this for real binary files (.sub, .nfc, "
+                + ".fap), not read+write.",
+                properties: [
+                    "src": str("Source path (Flipper /ext... or a computer path)."),
+                    "dst": str("Destination path or folder on the other machine."),
+                    "recursive": bool("Copy a whole folder.")
+                ],
+                required: ["src", "dst"]),
+            function(
+                "download",
+                "Download a URL straight onto either machine (the destination "
+                + "path decides which -- /ext... for the Flipper, else the "
+                + "computer). Binary-safe, 8 MB cap. This is how the Flipper, "
+                + "which has no network, gets a file off the internet.",
+                properties: [
+                    "url": str("The URL to fetch."),
+                    "dst": str("Where to save it (Flipper /ext... or computer path).")
+                ],
+                required: ["url", "dst"])
         ]
     }
 
@@ -253,7 +274,6 @@ enum NikitaTools {
     static func family(of tool: String) -> String {
         switch tool {
         case "remember", "list_memory", "forget": return "memory"
-        case "read_screen": return "screen"
         case "press_button": return "buttons"
         case "run_app": return "apps"
         case "save_file", "make_dir", "rename_file", "write_file":
@@ -265,6 +285,7 @@ enum NikitaTools {
         case "computer_write", "computer_mkdir": return "computer_write"
         case "computer_delete": return "computer_delete"
         case "computer_run": return "computer_run"
+        case "transfer", "download": return "computer_write"
         default: return "files"
         }
     }

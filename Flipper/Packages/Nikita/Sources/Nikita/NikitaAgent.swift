@@ -92,17 +92,17 @@ public final class NikitaAgent: ObservableObject {
         for round in 0..<maxToolRounds {
             if Task.isCancelled { return }
 
+            let hasBridge = await (machine?.isBridgeConnected ?? false)
             let system = NikitaPrompt.build(
                 needsTools: needsTools,
                 needsDevice: needsTools,
                 connected: connected,
+                hasBridge: hasBridge,
                 memory: memory.all(),
                 lastSavedPath: lastSavedPath)
 
             var msgs: [[String: Any]] = [["role": "system", "content": system]]
             msgs += trimmedWire()
-
-            let hasBridge = await (machine?.isBridgeConnected ?? false)
             let tools = NikitaTools.offered(
                 needsDevice: needsTools,
                 hasBridge: hasBridge,
@@ -185,7 +185,18 @@ public final class NikitaAgent: ObservableObject {
     // treated as data, never as syntax: a name with a space or a semicolon in
     // it must not turn into a second command.
     private func quoted(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        func q(_ v: String) -> String {
+            "'" + v.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        // A leading ~ must stay unquoted so the shell expands it to $HOME;
+        // quoting it makes "ls '~'" look for a directory literally named ~.
+        if value == "~" { return "~" }
+        if value.hasPrefix("~/") { return "~/" + q(String(value.dropFirst(2))) }
+        return q(value)
+    }
+
+    private func b64(_ value: String) -> String {
+        Data(value.utf8).base64EncodedString()
     }
 
     // MARK: Tool execution
@@ -258,6 +269,21 @@ public final class NikitaAgent: ObservableObject {
                 return (jsonOK(["output": try await machineRun("host \(command)")]),
                     true)
 
+            case "transfer":
+                let src = (args["src"] as? String) ?? ""
+                let dst = (args["dst"] as? String) ?? ""
+                let flags = ((args["recursive"] as? Bool) ?? false) ? " -r" : ""
+                let out = try await machineRun(
+                    "xcp \(b64(src)) \(b64(dst)) \(b64("~"))\(flags)")
+                return (jsonOK(["result": out]), true)
+
+            case "download":
+                let url = (args["url"] as? String) ?? ""
+                let dst = (args["dst"] as? String) ?? ""
+                let out = try await machineRun(
+                    "xwget \(b64(url)) \(b64(dst)) \(b64("~"))")
+                return (jsonOK(["result": out]), true)
+
             case "list_files":
                 let path = (args["path"] as? String) ?? "/ext"
                 let entries = try await bridge.listFiles(at: path)
@@ -295,16 +321,11 @@ public final class NikitaAgent: ObservableObject {
                     "path": path, "exists": info.exists,
                     "type": info.type, "size": info.size]), true)
 
-            case "read_screen":
-                let screen = try await bridge.readScreen()
-                return (jsonOK(["screen": screen]), true)
             case "press_button":
                 let button = (args["button"] as? String) ?? "ok"
                 let times = (args["times"] as? Int) ?? 1
                 try await bridge.pressButton(button, times: max(1, times))
-                let screen = (try? await bridge.readScreen()) ?? ""
-                return (jsonOK(["pressed": button, "times": max(1, times),
-                                "screen": screen]), true)
+                return (jsonOK(["pressed": button, "times": max(1, times)]), true)
             case "run_app":
                 let action = (args["action"] as? String) ?? "open"
                 let appName = args["name"] as? String
