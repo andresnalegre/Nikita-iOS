@@ -14,7 +14,7 @@ struct NikitaView: View {
     // Nikita can use too.
     @StateObject private var agent = NikitaAgent(
         bridge: LiveDeviceBridge(),
-        machine: MachineBridge.shared)
+        machine: MailboxMachineBridge())
     @State private var draft = ""
     @State private var showSettings = false
     @FocusState private var inputFocused: Bool

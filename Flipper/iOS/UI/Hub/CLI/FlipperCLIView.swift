@@ -21,11 +21,8 @@ final class FlipperCLI: ObservableObject {
         enum Kind { case input, output, error, system }
     }
 
-    enum Channel: String { case ble, machine }
-
     @Published private(set) var lines: [Line] = []
     @Published private(set) var running = false
-    @Published var channel: Channel = .ble
     @Published var history: [String] = []
 
     // Where "ls" and a bare command land, one per side. The machine's is
@@ -34,6 +31,38 @@ final class FlipperCLI: ObservableObject {
     // always know where you are before you look.
     @Published var machineCwd: String = "~"
     @Published var flipperCwd: String = "/ext"
+
+    // Live python3 REPL on the computer, driven line-by-line through the bridge.
+    @Published var pythonMode = false
+    @Published var pythonMore = false
+
+    // The built-in editor panel (edit / nano / vi ...).
+    @Published var editorOpen = false
+    @Published var editorPath = ""
+    @Published var editorText = ""
+    @Published var editorIsFlipper = false
+    @Published var editorSaving = false
+    @Published var editorMessage: String?
+
+    // Every command name, for the suggestion bar above the keyboard.
+    static let allCommands: [String] = {
+        let computer = ["ls","cat","tree","stat","md5","mkdir","rm","mv","cp",
+            "touch","echo","grep","sed","head","tail","wc","find","file","diff",
+            "du","df","cd","pwd","ps","kill","whoami","hostname","uname","id",
+            "env","which","date","ping","ifconfig","netstat","dig","nslookup",
+            "traceroute","ssh","git","python3","docker","nmap","tar","zip",
+            "unzip","gzip","openssl","base64","sha256sum","hexdump","xxd","awk",
+            "chmod","man","host","wget","curl","edit","nano","history","clear",
+            "help"]
+        let flipper = ["fls","fcat","ftree","fstat","fmd5","fmkdir","frm","fmv",
+            "ftouch","fecho","fgrep","fsed","fhead","ftail","fwc","ffind","ffile",
+            "fdiff","fdu","fdf","fcd","fpwd","fwhoami","fopen","fclose","freboot",
+            "fshutdown","fvibro","flocate","fwget"]
+        let firmware = ["device_info","info","storage","gpio","subghz","nfc",
+            "rfid","ir","led","power","loader","js","bt","top","log","free",
+            "uptime","vibro","nikita"]
+        return (computer + flipper + firmware).sorted()
+    }()
 
     let bridge = MachineBridge.shared
     private let device = LiveDeviceBridge()
@@ -58,41 +87,48 @@ final class FlipperCLI: ObservableObject {
         emit(.system, "cleared.")
     }
 
+    private func expandHistory(_ token: String) -> String? {
+        if token == "!!" { return history.last }
+        let body = String(token.dropFirst())
+        if let n = Int(body) {
+            return (n >= 1 && n <= history.count) ? history[n - 1] : nil
+        }
+        return history.last(where: { $0.hasPrefix(body) })
+    }
+
     func submit(_ raw: String) {
-        let cmd = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        var cmd = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cmd.isEmpty, !running else { return }
+        // In a live python3 session every line goes straight to the interpreter.
+        if pythonMode {
+            history.append(cmd)
+            emit(.input, cmd)
+            running = true
+            Task {
+                let out = await runPython(cmd)
+                for line in out { emit(line.kind, line.text) }
+                running = false
+            }
+            return
+        }
+        // History expansion, resolved before the line runs: !! repeats the
+        // last command, !12 re-runs entry 12, !ls the last one starting "ls".
+        if cmd.hasPrefix("!") {
+            guard let expanded = expandHistory(cmd) else {
+                emit(.input, raw)
+                emit(.error, "\(raw): no match in history")
+                return
+            }
+            cmd = expanded
+        }
         history.append(cmd)
         emit(.input, cmd)
 
-        // Local meta-commands, handled the same on both channels.
-        switch cmd.split(separator: " ").first.map(String.init) {
-        case "clear": clear(); return
-        case "channel":
-            let arg = cmd.split(separator: " ").dropFirst().first.map(String.init)
-            switch arg {
-            case "ble": channel = .ble; emit(.system, "channel: BLE")
-            case "machine": channel = .machine; emit(.system, "channel: MACHINE")
-            default: emit(.system, "channel is \(channel.rawValue.uppercased())")
-            }
-            return
-        case "connect":
-            let arg = cmd.split(separator: " ").dropFirst().first.map(String.init)
-            if let arg { bridge.setURL(arg) }
-            bridge.connect()
-            emit(.system, "connecting to \(bridge.urlString) …")
-            return
-        case "disconnect":
-            bridge.disconnect(); emit(.system, "bridge disconnected"); return
-        default: break
-        }
+        if cmd == "clear" { clear(); return }
 
         running = true
         Task {
-            let out: [Line]
-            switch channel {
-            case .ble: out = await runBLE(cmd)
-            case .machine: out = await runMachine(cmd)
-            }
+            let out = await route(cmd)
             for line in out { emit(line.kind, line.text) }
             running = false
         }
@@ -142,10 +178,152 @@ final class FlipperCLI: ObservableObject {
         catch { return error.localizedDescription }
     }
 
+    // The computer as a real shell: the whole line runs there, in the folder
+    // you are standing in, so pipes, quotes, globs and flags all survive. Only
+    // cd and pwd are caught, to keep the tracked cwd in step with the machine.
+    private func runMachineLine(_ line: String) async -> [Line] {
+        let parts = line.split(whereSeparator: { $0 == " " }).map(String.init)
+        let verb = parts.first.map(Self.normalise) ?? ""
+        let cwd = Self.shq(machineCwd)
+        if verb == "cd" {
+            let target = parts.count > 1 ? Self.shq(parts[1]) : "~"
+            let out = await runMachineRaw(
+                "cd \(cwd) 2>/dev/null; cd \(target) && pwd")
+            let path = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            if path.hasPrefix("/") { machineCwd = path; return [] }
+            return [.init(text: out.isEmpty ? "cd: no such directory" : out,
+                          kind: .error)]
+        }
+        if verb == "pwd" {
+            let out = await runMachineRaw("cd \(cwd) 2>/dev/null && pwd")
+            return [.init(text: out.isEmpty ? machineCwd : out, kind: .output)]
+        }
+        let out = await runMachineRaw("cd \(cwd) 2>/dev/null && " + line)
+        return [.init(text: out.isEmpty ? "(no output)" : out, kind: .output)]
+    }
+
+    // A raw firmware command, to the Flipper's own shell through the bridge.
+    private func runFlipperRaw(_ command: String) async -> String {
+        do { return try await mailboxSend(command) }
+        catch { return error.localizedDescription }
+    }
+
+    private func sendMailbox(_ command: String) async -> String {
+        do { return try await mailboxSend(command) }
+        catch { return error.localizedDescription }
+    }
+
+    private static func b64(_ s: String) -> String {
+        Data(s.utf8).base64EncodedString()
+    }
+
+    // cp [-r] <src> <dst>: the bridge moves the bytes -- binary-safe and
+    // MD5-verified -- in whichever direction the paths imply (Mac<->Flipper).
+    private func runTransfer(_ args: [String]) async -> [Line] {
+        let flags = args.filter { $0.hasPrefix("-") }
+        let paths = args.filter { !$0.hasPrefix("-") }
+        guard paths.count >= 2 else { return usage("cp [-r] <src> <dst>") }
+        let flagStr = flags.isEmpty ? "" : " " + flags.joined(separator: " ")
+        let cmd = "xcp \(Self.b64(paths[0])) \(Self.b64(paths[1])) "
+            + "\(Self.b64(machineCwd))\(flagStr)"
+        let out = await sendMailbox(cmd)
+        return [.init(text: out.isEmpty ? "(done)" : out, kind: .output)]
+    }
+
+    // wget/fwget <url> [dest]: download on the computer, land it on whichever
+    // machine the destination points at (fwget always the Flipper).
+    private func runWget(_ args: [String], toFlipper: Bool) async -> [Line] {
+        guard let url = args.first else { return usage("wget <url> [dest]") }
+        let base = URL(string: url)?.lastPathComponent ?? "download"
+        let name = base.isEmpty ? "download" : base
+        let dst: String
+        if args.count > 1 { dst = args[1] }
+        else if toFlipper { dst = flipperCwd + "/" + name }
+        else { dst = name }
+        let cmd = "xwget \(Self.b64(url)) \(Self.b64(dst)) \(Self.b64(machineCwd))"
+        let out = await sendMailbox(cmd)
+        return [.init(text: out.isEmpty ? "(done)" : out, kind: .output)]
+    }
+
+    // One line into the live python session; the reply's first byte is state:
+    // \u{00} done, \u{01} needs more input, \u{02} the session exited.
+    private func runPython(_ line: String) async -> [Line] {
+        let resp = await sendMailbox("xpy \(Self.b64(line))")
+        guard let flag = resp.first else { pythonMore = false; return [] }
+        let text = String(resp.dropFirst()).trimmingCharacters(in: .newlines)
+        switch flag {
+        case "\u{02}":
+            pythonMode = false
+            pythonMore = false
+            var out: [Line] = text.isEmpty ? [] : [.init(text: text, kind: .output)]
+            out.append(.init(text: "[ python3 session ended ]", kind: .system))
+            return out
+        case "\u{01}":
+            pythonMore = true
+            return text.isEmpty ? [] : [.init(text: text, kind: .output)]
+        default:
+            pythonMore = false
+            return text.isEmpty ? [] : [.init(text: text, kind: .output)]
+        }
+    }
+
+    // edit/nano/vi <path>: pull the file into the editor sheet; the machine is
+    // the one the path points at (a Flipper path over RPC, else the computer).
+    private func openEditor(_ args: [String]) async -> [Line] {
+        guard let path = args.first else { return usage("edit <path>") }
+        let isFlip = path.hasPrefix("/ext") || path.hasPrefix("/int")
+        let content: String
+        if isFlip {
+            content = (try? await device.readFile(at: path)) ?? ""
+        } else {
+            content = await runMachineRaw("cat \(Self.shq(path)) 2>/dev/null")
+        }
+        editorPath = path
+        editorIsFlipper = isFlip
+        editorText = content
+        editorMessage = nil
+        editorOpen = true
+        return [.init(text: "[ editing \(path) -- save or cancel in the editor ]",
+                      kind: .system)]
+    }
+
+    func saveEditor() async {
+        editorSaving = true
+        defer { editorSaving = false }
+        if editorIsFlipper {
+            do {
+                try await device.writeFile(at: editorPath, content: editorText)
+                editorMessage = "saved \(editorPath)"
+                editorOpen = false
+            } catch {
+                editorMessage = "save failed: \(error.localizedDescription)"
+            }
+        } else {
+            let encoded = Data(editorText.utf8).base64EncodedString()
+            let out = await runMachineRaw(
+                "printf %s \(Self.shq(encoded)) | openssl base64 -d -A > "
+                + "\(Self.shq(editorPath))")
+            if out.isEmpty {
+                editorMessage = "saved \(editorPath)"
+                editorOpen = false
+            } else {
+                editorMessage = out
+            }
+        }
+    }
+
     // Single-quote for the shell, so a path with a space or a quote is one
-    // argument and never a second command.
+    // argument and never a second command. A leading "~" (or "~/") is kept
+    // OUTSIDE the quotes so the shell still expands it to $HOME -- quoting the
+    // tilde makes "cd '~'" look for a directory literally named ~, which fails
+    // and leaves every "ls" from the home dir empty.
     private static func shq(_ value: String) -> String {
-        "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        func q(_ v: String) -> String {
+            "'" + v.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }
+        if value == "~" { return "~" }
+        if value.hasPrefix("~/") { return "~/" + q(String(value.dropFirst(2))) }
+        return q(value)
     }
 
     // Resolve a Flipper path by hand -- no shell over there to do it. Absolute
@@ -183,6 +361,26 @@ final class FlipperCLI: ObservableObject {
     private static let mailboxReq = "/ext/nikita/bridge/req"
     private static let mailboxRes = "/ext/nikita/bridge/res"
 
+    static let bridgeBootstrapHelp = """
+        flipper-bridge bootstraps the computer the Flipper is plugged into.
+
+        The phone cannot install it over Bluetooth alone — a bare machine has
+        nothing listening on the USB yet. The Flipper does it from its own USB
+        serial CLI:
+
+        1. Plug the Flipper into the computer with the cable.
+        2. Open the Flipper CLI with:  screen /dev/cu.usbmodemflip*
+           (screen lets go of the port on its own the moment the next step
+           runs. qFlipper works too, but hit RELEASE PORT right after typing
+           the command -- otherwise it keeps the serial line the bridge needs.)
+        3. Type:  nikita install flipper-bridge
+
+        The Flipper becomes a keyboard, opens Terminal, types the bridge in and
+        starts it in --mailbox mode. It waits for the serial port to come back,
+        so a brief busy moment is fine. After that, ls / fls and everything
+        else here work.
+        """
+
     // Leave a command on the card and wait for the matching answer.
     //
     // Every request carries an id, and the reply must carry the same one: the
@@ -199,6 +397,9 @@ final class FlipperCLI: ObservableObject {
         // CLI on the far side mangles spaces and newlines when a file crosses
         // it, and a shell command is nothing but spaces; base64 has neither, so
         // it survives the trip whole.
+        // Clear any leftover answer before asking, so a stale response from a
+        // previous command can never be mistaken for this one's.
+        try? await device.deleteFile(at: Self.mailboxRes, recursive: false)
         let encoded = Data(command.utf8).base64EncodedString()
         try await device.writeFile(
             at: Self.mailboxReq, content: id + "." + encoded)
@@ -269,36 +470,115 @@ final class FlipperCLI: ObservableObject {
     private static let dualVerbs: Set<String> = [
         "ls", "cat", "tree", "stat", "md5", "mkdir", "rm", "mv", "df",
         "touch", "echo", "grep", "head", "tail", "wc", "find", "du",
-        "whoami", "open", "close", "cd", "pwd"
+        "whoami", "open", "close", "cd", "pwd", "sed", "diff", "file"
     ]
 
     // Spellings of the same verb, within one machine.
     private static func normalise(_ verb: String) -> String {
         let synonyms = [
-            "dir": "ls", "read": "cat", "del": "rm", "rename": "mv",
-            "hash": "md5", "storage": "df", "press": "btn", "beep": "alert",
-            "power_info": "power", "property": "props", "device_info": "info"
+            "dir": "ls", "ll": "ls", "la": "ls", "read": "cat", "type": "cat",
+            "del": "rm", "erase": "rm", "rename": "mv", "move": "mv", "ren": "mv",
+            "hash": "md5", "md5sum": "md5", "md": "mkdir", "chdir": "cd",
+            "lcd": "cd", "lpwd": "pwd", "diskfree": "df", "press": "btn",
+            "beep": "alert", "power_info": "power", "property": "props",
+            "copy": "cp", "pull": "cp", "push": "cp", "curl": "wget",
+            "fetch": "wget", "nano": "edit", "vi": "edit", "vim": "edit",
+            "emacs": "edit", "pico": "edit", "micro": "edit", "python": "python3"
         ]
         return synonyms[verb] ?? verb
     }
 
-    private func runBLE(_ line: String) async -> [Line] {
+    // The Flipper's own firmware vocabulary: bare, passed straight through to
+    // the device exactly as typed (subghz, nfc, storage, device_info, ...).
+    private static let firmwareVerbs: Set<String> = [
+        "device_info", "info", "gpio", "subghz", "nfc", "rfid", "ir", "led",
+        "loader", "storage", "power", "top", "log", "js", "bt", "crypto",
+        "date", "free", "free_blocks", "i2c", "onewire", "sysctl", "uptime",
+        "input", "neofetch", "vibro", "nikita", "ikey", "factory_reset",
+        "update", "reload_ext_cmds", "start_rpc_session", "sleep",
+        "props", "screen", "btn", "alert", "unlock", "reboot"
+    ]
+
+    // Flipper-only verbs -- they only make sense on the device.
+    private static let flipperOnly: Set<String> = [
+        "fclose", "fopen", "freboot", "fshutdown", "fvibro", "fname", "flocate"
+    ]
+
+    private static func flipperCanon(_ raw: String) -> String {
+        [
+            "fclose": "close", "fopen": "open", "freboot": "reboot",
+            "fshutdown": "shutdown", "fvibro": "vibro", "fname": "name",
+            "flocate": "locate"
+        ][raw] ?? String(raw.dropFirst())
+    }
+
+    private func route(_ line: String) async -> [Line] {
         let parts = line.split(whereSeparator: { $0 == " " }).map(String.init)
         guard let raw = parts.first else { return [] }
         let verb = Self.normalise(raw)
         var args = Array(parts.dropFirst())
 
-        // Bare Unix verb: the user means the computer. It travels through the
-        // bridge, because the phone cannot reach that machine any other way.
-        if Self.dualVerbs.contains(verb) {
-            return await runMachineCwd(verb: verb, args: args)
+        // Panel-only + the escape hatch, before anything touches a wire.
+        if raw == "help" || raw == "?" {
+            return [.init(text: bleHelp, kind: .output)]
+        }
+        if raw == "history" {
+            if args.first == "-c" { history.removeAll(); return ok("history cleared") }
+            let listing = history.enumerated()
+                .map { "\($0.offset + 1)  \($0.element)" }
+                .joined(separator: "\n")
+            return [.init(text: listing.isEmpty ? "(empty)" : listing, kind: .output)]
+        }
+        if raw == "host" || raw == "local" || raw == "run" {
+            let rest = line.drop(while: { $0 != " " })
+                .trimmingCharacters(in: .whitespaces)
+            return await runMachineLine(rest.isEmpty ? "pwd" : rest)
         }
 
-        // "f" + a dual verb: the Flipper. Everything below works on the card.
-        let stripped = raw.hasPrefix("f") && raw.count > 1
-            ? Self.normalise(String(raw.dropFirst()))
+        // "nikita install ..." must NOT travel the mailbox: the mailbox is the
+        // bridge it is installing, so routing it there just times out with a
+        // misleading "no answer". Intercept it and tell the truth.
+        if raw == "nikita", args.first == "install" {
+            let target = args.count > 1 ? args[1] : ""
+            if target == "flipper-bridge" || target.isEmpty {
+                return [.init(text: Self.bridgeBootstrapHelp, kind: .output)]
+            }
+            return [.init(text: "nikita install: unknown target \(target). "
+                + "Did you mean flipper-bridge?", kind: .error)]
+        }
+
+        // ---- smart transfers, the REPL and the editor (bridge-backed) ----
+        if verb == "cp" { return await runTransfer(args) }
+        if verb == "wget" { return await runWget(args, toFlipper: false) }
+        if raw == "fwget" { return await runWget(args, toFlipper: true) }
+        if verb == "python3", args.isEmpty {
+            pythonMode = true
+            pythonMore = false
+            return [.init(text: "[ python3 -- runs on the computer, not the "
+                + "Flipper. exit() or quit() to leave. ]", kind: .system)]
+        }
+        if verb == "edit" { return await openEditor(args) }
+
+        // ---- the one rule: bare = this computer, f<verb> = the Flipper ----
+        //
+        // f + a dual verb (fls, fcat, ...) or an f-only verb (fopen, fclose,
+        // freboot, fvibro, fname, flocate, fshutdown) means the Flipper. A bare
+        // firmware word (subghz, nfc, storage, device_info, ...) is the
+        // Flipper's own vocabulary and passes straight through to it.
+        // EVERYTHING else -- every real Unix program -- runs on THIS computer.
+        let fStripped = raw.hasPrefix("f") && raw.count > 1
+            ? Self.normalise(String(raw.dropFirst())) : ""
+        let isFlipper = (!fStripped.isEmpty && Self.dualVerbs.contains(fStripped))
+            || Self.flipperOnly.contains(raw)
+        let isFirmware = Self.firmwareVerbs.contains(verb)
+
+        if !isFlipper && !isFirmware {
+            return await runMachineLine(line)
+        }
+
+        let cmd = isFlipper
+            ? (Self.flipperOnly.contains(raw) ? Self.flipperCanon(raw) : fStripped)
             : verb
-        let cmd = Self.dualVerbs.contains(stripped) ? stripped : verb
 
         // fcd / fpwd navigate the Flipper the way cd / pwd navigate the machine.
         // The Flipper has no shell, so the path math is done here.
@@ -315,9 +595,17 @@ final class FlipperCLI: ObservableObject {
             return [.init(text: flipperCwd, kind: .output)]
         }
         // A bare fls lists where you are; a relative path resolves against it.
+        // Resolve a relative path against the Flipper cwd -- but only for the
+        // verbs whose first argument IS a path. For grep/echo/btn/open and the
+        // firmware words the first argument is a pattern or a value, not a path.
+        let flipperPathVerbs: Set<String> = [
+            "ls", "tree", "cat", "stat", "md5", "rm", "mkdir", "touch",
+            "du", "df", "mv"
+        ]
         if args.isEmpty, cmd == "ls" || cmd == "tree" {
             args = [flipperCwd]
-        } else if let first = args.first, !first.hasPrefix("/") {
+        } else if flipperPathVerbs.contains(cmd), let first = args.first,
+                  !first.hasPrefix("/") {
             args[0] = Self.resolveFlipper(flipperCwd, first)
         }
 
@@ -533,18 +821,88 @@ final class FlipperCLI: ObservableObject {
                 // No RPC for the motor; the alert does buzz, which is the
                 // honest nearest thing rather than a silent no-op.
                 try await deps.device.playAlert()
-                return ok("buzzed (vibro proper needs the machine channel)")
+                return ok("buzzed")
+
+            case "locate":
+                return try await findCmd(
+                    "/ext", needle: (args.first ?? "").lowercased())
 
             case "shutdown":
+                let out = await runFlipperRaw("power off")
+                return ok(out.isEmpty ? "powering off" : out)
+
+            case "name":
+                return [.init(text: "fname: rename in qFlipper > Settings "
+                    + "(not wired to mobile yet).", kind: .error)]
+
+            case "file":
+                guard let p0 = args.first else { return usage("ffile <path>") }
+                let path = p0.hasPrefix("/") ? p0
+                    : Self.resolveFlipper(flipperCwd, p0)
+                let body = try await device.readFile(at: path)
+                let what = body.isEmpty ? "empty"
+                    : (body.unicodeScalars.contains { $0.value == 0 }
+                        ? "data (binary)"
+                        : "ASCII text, \(body.split(separator: "\n").count) lines")
+                return ok("\(path): \(what)")
+
+            case "sed":
+                guard args.count >= 2, args[0].hasPrefix("s/") else {
+                    return usage("fsed s/old/new/[g] <path>")
+                }
+                let parts = args[0].split(
+                    separator: "/", omittingEmptySubsequences: false)
+                guard parts.count >= 3 else {
+                    return usage("fsed s/old/new/[g] <path>")
+                }
+                let old = String(parts[1]), new = String(parts[2])
+                let global = parts.count > 3 && parts[3].contains("g")
+                let p1 = args[args.count - 1]
+                let path = p1.hasPrefix("/") ? p1
+                    : Self.resolveFlipper(flipperCwd, p1)
+                let body = try await device.readFile(at: path)
+                let result: String
+                if global {
+                    result = body.replacingOccurrences(of: old, with: new)
+                } else if let r = body.range(of: old) {
+                    result = body.replacingCharacters(in: r, with: new)
+                } else {
+                    result = body
+                }
+                try await device.writeFile(at: path, content: result)
+                return ok("fsed: updated \(path)")
+
+            case "diff":
+                guard args.count >= 2 else { return usage("fdiff <a> <b>") }
+                func resolve(_ x: String) -> String {
+                    x.hasPrefix("/") ? x : Self.resolveFlipper(flipperCwd, x)
+                }
+                let a = try await device.readFile(at: resolve(args[0]))
+                    .split(separator: "\n", omittingEmptySubsequences: false)
+                let b = try await device.readFile(at: resolve(args[1]))
+                    .split(separator: "\n", omittingEmptySubsequences: false)
+                var diff: [String] = []
+                for i in 0..<max(a.count, b.count) {
+                    let la = i < a.count ? String(a[i]) : ""
+                    let lb = i < b.count ? String(b[i]) : ""
+                    if la != lb {
+                        if !la.isEmpty { diff.append("- \(la)") }
+                        if !lb.isEmpty { diff.append("+ \(lb)") }
+                    }
+                }
                 return [.init(
-                    text: "shutdown needs the machine channel: "
-                        + "channel machine, then 'power off'",
-                    kind: .error)]
+                    text: diff.isEmpty ? "(identical)" : diff.joined(separator: "\n"),
+                    kind: .output)]
 
             default:
-                return [.init(text: "unknown BLE command: \(cmd) "
-                    + "(type 'help', or 'channel machine' for the raw CLI)",
-                    kind: .error)]
+                // Not one of the mapped verbs: it is a raw firmware command --
+                // subghz, nfc, gpio, ir, led, power, js, loader and the rest.
+                // Straight to the Flipper's own shell through the bridge (no
+                // "host" -- that would run it on the computer), so the single
+                // prompt reaches the whole device with nothing to switch.
+                let out = await runFlipperRaw(line)
+                return [.init(text: out.isEmpty ? "(no output)" : out,
+                              kind: .output)]
             }
         } catch {
             return [.init(text: error.localizedDescription, kind: .error)]
@@ -654,35 +1012,64 @@ final class FlipperCLI: ObservableObject {
         lines.append(.init(text: text, kind: kind))
     }
 
+    // Two aligned columns per section, the way nikita-qflipper lays it out.
+    private static func columns(_ items: [String], width: Int = 18) -> String {
+        let names = items.sorted()
+        var rows: [String] = []
+        var i = 0
+        while i < names.count {
+            let left = names[i]
+            if i + 1 < names.count {
+                let padded = left.padding(
+                    toLength: width, withPad: " ", startingAt: 0)
+                rows.append("  " + padded + names[i + 1])
+            } else {
+                rows.append("  " + left)
+            }
+            i += 2
+        }
+        return rows.joined(separator: "\n")
+    }
+
     private var bleHelp: String {
-        """
-        Two machines, one prompt. The prefix picks which.
+        let flipper = [
+            "fls", "fcat", "ftree", "fstat", "fmd5", "fmkdir", "frm", "fmv",
+            "ftouch", "fecho", "fgrep", "fsed", "fhead", "ftail", "fwc",
+            "ffind", "ffile", "fdiff", "fdu", "fdf", "fcd", "fpwd", "fwhoami",
+            "fopen", "fclose", "freboot", "fshutdown", "fvibro", "flocate",
+        ]
+        let computer = [
+            "ls", "cat", "tree", "stat", "md5", "mkdir", "rm", "mv", "cp",
+            "touch", "echo", "grep", "sed", "head", "tail", "wc", "find",
+            "file", "diff", "du", "df", "cd", "pwd", "ps", "kill", "whoami",
+            "hostname", "uname", "id", "env", "which", "date", "ping",
+            "ifconfig", "netstat", "dig", "nslookup", "traceroute", "ssh",
+            "git", "python3", "docker", "nmap", "tar", "zip", "unzip", "gzip",
+            "openssl", "base64", "sha256sum", "hexdump", "xxd", "awk", "chmod",
+            "man", "host",
+        ]
+        let firmware = [
+            "device_info", "info", "storage", "gpio", "subghz", "nfc", "rfid",
+            "ir", "led", "power", "loader", "js", "bt", "top", "log", "free",
+            "uptime", "vibro", "nikita", "onewire", "i2c", "input", "crypto",
+            "sysctl", "neofetch",
+        ]
+        return """
+        One prompt, two machines. The NAME picks which: a bare name is THIS
+        COMPUTER (the real Unix program); an f-prefixed name is the FLIPPER.
 
-          ls  /Users/me      the COMPUTER the Flipper is plugged into
-          fls /ext           the FLIPPER itself
+        ------ Flipper (f + verb) ------
+        \(Self.columns(flipper))
 
-        Bare Unix verbs go to the computer, through nikita-flipper-bridge
-        running there. The same verb with an f goes to the Flipper over
-        Bluetooth. Both sides:
-          ls  cat  tree  stat  md5  mkdir  rm  mv  df  touch  echo
-          grep  head  tail  wc  find  du  whoami  open  close
+        ------ Computer (bare) ------
+        \(Self.columns(computer))
 
-        Flipper only, no prefix needed -- nothing on the computer they
-        could mean:
-          info  power  props  screen  btn <name> [n]  alert  vibro
-          unlock  date  ping  reboot [os|dfu|update]  write <path> <text>
+        ------ Firmware (bare -> the Flipper) ------
+        \(Self.columns(firmware))
 
-        Text tools run on the phone for the Flipper side: the firmware has no
-        grep and no room to grow one, so the file is read once and filtered
-        here.
-
-        The computer needs nikita-flipper-bridge running on it, plugged to
-        the Flipper by USB. The phone reaches it through the Flipper's SD
-        card over Bluetooth -- no WiFi, no address to type. Start it with:
+        The computer side needs nikita-flipper-bridge running there over USB:
           python3 bridge.py --mailbox --allow-host
-
-        channel machine       type straight into the Flipper's own shell
-        clear
+        host <cmd> forces the computer.  history, !!, !n.  clear.
         """
     }
 
@@ -708,12 +1095,7 @@ struct FlipperCLIView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            channelBar
-            output
-            Divider().overlay(Color.a1.opacity(0.4))
-            inputBar
-        }
+        terminal
         .background(Color.background)
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackground(Color.background)
@@ -722,54 +1104,123 @@ struct FlipperCLIView: View {
             LeadingToolbarItems { BackButton { dismiss() } }
             PrincipalToolbarItems(alignment: .leading) { Title("CLI") }
         }
+        .sheet(isPresented: $cli.editorOpen) { editorSheet }
     }
 
-    private var channelBar: some View {
-        HStack(spacing: 6) {
-            Text("BLE")
-                .font(.system(size: 11, weight: .bold, design: .monospaced))
-                .foregroundColor(.a2)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .overlay(RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.a2.opacity(0.6), lineWidth: 1))
-            Spacer()
+    // The built-in editor -- edit/nano/vi on either machine open here.
+    private var editorSheet: some View {
+        NavigationView {
+            VStack(spacing: 0) {
+                TextEditor(text: $cli.editorText)
+                    .font(.system(.body, design: .monospaced))
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                if let msg = cli.editorMessage {
+                    Text(msg)
+                        .font(.caption)
+                        .foregroundColor(.a1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(8)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    Text(cli.editorPath)
+                        .font(.system(.caption, design: .monospaced))
+                }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { cli.editorOpen = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if cli.editorSaving {
+                        ProgressView()
+                    } else {
+                        Button("Save") { Task { await cli.saveEditor() } }
+                    }
+                }
+            }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.groupedBackground)
     }
 
-    private var bridgeColor: Color {
-        switch cli.bridge.state {
-        case .connected: return .a2
-        case .connecting: return .sYellow
-        case .failed: return .sRed
-        case .disconnected: return .black30
-        }
-    }
 
-    private var bridgeLabel: String {
-        switch cli.bridge.state {
-        case .connected: return "bridge up"
-        case .connecting: return "connecting"
-        case .failed(let e): return e
-        case .disconnected: return "connect ws://…"
-        }
-    }
 
-    private var output: some View {
+    private var terminal: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 3) {
                     ForEach(cli.lines) { line in row(line).id(line.id) }
-                    Color.clear.frame(height: 1).id("bottom")
+                    VStack(alignment: .leading, spacing: 2) {
+                        suggestionBar
+                        inputLine
+                    }.id("bottom")
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(12)
             }
+            // Tapping anywhere in the terminal puts the cursor back on the
+            // command line, the way a terminal behaves.
+            .contentShape(Rectangle())
+            .onTapGesture { focused = true }
             .onChange(of: cli.lines.count) { _ in
                 withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onAppear { focused = true }
+        }
+    }
+
+    // The prompt and the cursor as the terminal's last line -- no bar, no
+    // border, no button. Enter (the keyboard's return) runs it. While a command
+    // is in flight the line shows a small spinner in place of the cursor.
+    private var inputLine: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 0) {
+            Text(prompt).foregroundColor(.a2)
+            if cli.running {
+                Text(input).foregroundColor(.primary)
+                ProgressView().scaleEffect(0.6).padding(.leading, 6)
+            } else {
+                TextField("", text: $input)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .focused($focused)
+                    .onSubmit(send)
+                    .submitLabel(.go)
+                    .tint(.a2)
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.system(.caption, design: .monospaced))
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // Tab-style completion for a phone with no Tab key: the command names that
+    // start with what you have typed so far, tap to fill in.
+    private var suggestions: [String] {
+        guard !cli.pythonMode, !cli.running else { return [] }
+        let typed = input
+        guard !typed.isEmpty, !typed.contains(" ") else { return [] }
+        return Array(FlipperCLI.allCommands
+            .filter { $0.hasPrefix(typed) && $0 != typed }
+            .prefix(8))
+    }
+
+    @ViewBuilder private var suggestionBar: some View {
+        if !suggestions.isEmpty {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(suggestions, id: \.self) { name in
+                        Text(name)
+                            .font(.system(.caption2, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.a2.opacity(0.15))
+                            .cornerRadius(6)
+                            .onTapGesture {
+                                input = name + " "
+                                focused = true
+                            }
+                    }
+                }
             }
         }
     }
@@ -797,11 +1248,12 @@ struct FlipperCLIView: View {
     // the computer, and -- only when you have moved off the card's root -- where
     // you are on the Flipper. "~" for home and for /ext, the way a shell does.
     private var prompt: String {
+        if cli.pythonMode { return cli.pythonMore ? "... " : ">>> " }
         let host = Self.tildeHome(cli.machineCwd)
         let flip = cli.flipperCwd == "/ext"
             ? ""
             : "[f:" + Self.tildeExt(cli.flipperCwd) + "]"
-        return "\(cli.devName)@qflipper \(host)\(flip) % "
+        return "\(cli.devName)@flipper \(host)\(flip) % "
     }
 
     private static func tildeHome(_ path: String) -> String {
@@ -825,33 +1277,6 @@ struct FlipperCLIView: View {
         return path
     }
 
-    private var inputBar: some View {
-        HStack(spacing: 8) {
-            Text(prompt)
-                .font(.system(.caption, design: .monospaced))
-                .foregroundColor(.a2)
-                .lineLimit(1)
-                .fixedSize()
-            TextField("", text: $input)
-                .font(.system(.caption, design: .monospaced))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .focused($focused)
-                .onSubmit(send)
-                .submitLabel(.send)
-            if cli.running {
-                ProgressView().scaleEffect(0.7)
-            } else {
-                Button(action: send) {
-                    Image(systemName: "return").foregroundColor(.a1)
-                }
-                .disabled(input.trimmingCharacters(in: .whitespaces).isEmpty)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(Color.groupedBackground)
-    }
 
     private func send() {
         let cmd = input
