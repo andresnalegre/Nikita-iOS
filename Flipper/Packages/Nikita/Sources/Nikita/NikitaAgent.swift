@@ -230,6 +230,10 @@ public final class NikitaAgent: ObservableObject {
                 let command = (args["command"] as? String) ?? ""
                 return (jsonOK(["output": try await machineRun(command)]), true)
 
+            case "scan_viewer":
+                let raw = try await machineRun("nikita host")
+                return (jsonOK(HostScan.parse(raw).toolPayload), true)
+
             case "computer_list":
                 let path = (args["path"] as? String) ?? "~"
                 return (jsonOK(["path": path,

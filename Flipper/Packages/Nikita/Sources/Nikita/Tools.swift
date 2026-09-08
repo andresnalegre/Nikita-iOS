@@ -188,6 +188,18 @@ enum NikitaTools {
                     + "Flipper's shell expects it.")],
                 required: ["command"]),
             function(
+                "scan_viewer",
+                "Scan the machine the Flipper is plugged into and identify its "
+                + "OS. The Flipper can't read its host directly, so this reads "
+                + "the PASSIVE fingerprint the firmware collected from how the "
+                + "host enumerated the USB (Windows uniquely fetches the MS OS "
+                + "string 0xEE; macOS pulls serial+product strings; Linux's "
+                + "first device-descriptor length is 64). Returns the OS guess "
+                + "(windows/macos/linux/unknown) plus the raw signals. ALWAYS "
+                + "call this BEFORE writing a Bad USB script, so you tailor it "
+                + "to the target -- Spotlight vs Win+R, the keyboard layout, "
+                + "whether to spoof an Apple keyboard VID/PID. No arguments."),
+            function(
                 "computer_list",
                 "List a folder on the computer the Flipper is plugged into. "
                 + "Use it to see what is on that machine -- the phone has no "
@@ -279,7 +291,7 @@ enum NikitaTools {
         case "save_file", "make_dir", "rename_file", "write_file":
             return "files_write"
         case "delete_file": return "files_delete"
-        case "run_cli": return "serial"
+        case "run_cli", "scan_viewer": return "serial"
         case "computer_list", "computer_read", "computer_find":
             return "computer_read"
         case "computer_write", "computer_mkdir": return "computer_write"
