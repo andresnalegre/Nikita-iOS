@@ -19,7 +19,12 @@ struct ScanViewerView: View {
     var showsClose: Bool = false
 
     @StateObject private var model = ScanViewerModel()
+    @StateObject private var ble = BLEEnvironmentScanner()
     @Environment(\.dismiss) private var dismiss
+
+    enum Mode: String, CaseIterable { case host = "Host (USB)"
+                                      case nearby = "Nearby (BLE)" }
+    @State private var mode: Mode = .host
 
     var body: some View {
         ZStack {
@@ -27,27 +32,20 @@ struct ScanViewerView: View {
             VStack(spacing: 0) {
                 header
                 Divider().overlay(Color.a2.opacity(0.4))
-                ScrollView {
-                    VStack(spacing: 16) {
-                        verdictPanel
-                        if case let .result(scan, raw) = model.state {
-                            signalsPanel(scan)
-                            rawPanel(raw)
-                        } else if case let .error(message) = model.state {
-                            noticePanel(
-                                icon: "exclamationmark.triangle.fill",
-                                title: "Scan failed", message: message)
-                        } else if case .noBridge = model.state {
-                            noticePanel(
-                                icon: "cable.connector.slash",
-                                title: "No bridge",
-                                message: "Plug the Flipper into the computer and "
-                                    + "run  python3 bridge.py --mailbox  so the "
-                                    + "Viewer can read the host it is attached to.")
-                        }
-                        rescanButton
+                Picker("", selection: $mode) {
+                    ForEach(Mode.allCases, id: \.self) { m in
+                        Text(m.rawValue).tag(m)
                     }
-                    .padding(16)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .padding(.top, 12)
+                ScrollView {
+                    if mode == .host {
+                        hostContent
+                    } else {
+                        nearbyContent
+                    }
                 }
             }
         }
@@ -67,7 +65,114 @@ struct ScanViewerView: View {
                 }
             }
         }
-        .onAppear { model.scanIfIdle() }
+        .onAppear {
+            model.scanIfIdle()
+            if mode == .nearby { ble.start() }
+        }
+        .onDisappear { ble.stop() }
+        .onChange(of: mode) { newMode in
+            if newMode == .nearby { ble.start() } else { ble.stop() }
+        }
+    }
+
+    // MARK: Host (USB) tab
+
+    private var hostContent: some View {
+        VStack(spacing: 16) {
+            verdictPanel
+            if case let .result(scan, raw) = model.state {
+                signalsPanel(scan)
+                rawPanel(raw)
+            } else if case let .error(message) = model.state {
+                noticePanel(
+                    icon: "exclamationmark.triangle.fill",
+                    title: "Scan failed", message: message)
+            } else if case .noBridge = model.state {
+                noticePanel(
+                    icon: "cable.connector.slash",
+                    title: "No bridge",
+                    message: "Plug the Flipper into the computer and "
+                        + "run  python3 bridge.py --mailbox  so the "
+                        + "Viewer can read the host it is attached to.")
+            }
+            rescanButton
+        }
+        .padding(16)
+    }
+
+    // MARK: Nearby (BLE) tab
+
+    private var nearbyContent: some View {
+        VStack(spacing: 10) {
+            switch ble.state {
+            case .poweredOff:
+                noticePanel(icon: "wifi.slash", title: "Bluetooth is off",
+                            message: "Turn Bluetooth on to scan for nearby "
+                                + "TVs, consoles and devices.")
+            case .unauthorized:
+                noticePanel(icon: "lock.fill", title: "No Bluetooth access",
+                            message: "Allow Bluetooth for the app in Settings.")
+            case .unsupported:
+                noticePanel(icon: "xmark.octagon", title: "Unsupported",
+                            message: "This device can't scan BLE.")
+            case .idle, .scanning:
+                if ble.devices.isEmpty {
+                    HStack(spacing: 10) {
+                        ProgressView()
+                        Text("Listening for BLE advertisers…")
+                            .font(.system(size: 13, weight: .medium,
+                                          design: .monospaced))
+                            .foregroundColor(.black30)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 40)
+                } else {
+                    ForEach(ble.devices) { dev in
+                        bleRow(dev)
+                    }
+                }
+            }
+        }
+        .padding(16)
+    }
+
+    private func bleRow(_ dev: BLEEnvironmentScanner.Device) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: dev.category.icon)
+                .font(.system(size: 20))
+                .foregroundColor(dev.category == .unknown ? .black40 : .a1)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(dev.name)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                Text(dev.category.rawValue
+                     + (dev.serviceUUIDs.isEmpty ? ""
+                        : " · " + dev.serviceUUIDs.prefix(3).joined(separator: " ")))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundColor(.black30)
+                    .lineLimit(1)
+            }
+            Spacer()
+            signalBars(dev.rssi)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.groupedBackground)
+        .cornerRadius(10)
+    }
+
+    private func signalBars(_ rssi: Int) -> some View {
+        // -50 or better = full, -100 or worse = empty.
+        let level = max(0, min(4, (rssi + 100) / 12))
+        return HStack(alignment: .bottom, spacing: 2) {
+            ForEach(0..<4, id: \.self) { i in
+                RoundedRectangle(cornerRadius: 1)
+                    .fill(i < level ? Color.a1 : Color.black40.opacity(0.3))
+                    .frame(width: 3, height: 5 + CGFloat(i) * 3)
+            }
+        }
     }
 
     // MARK: Header -- the dynamic context line, like the browser's folder name.
