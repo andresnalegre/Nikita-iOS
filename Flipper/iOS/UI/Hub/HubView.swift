@@ -10,6 +10,7 @@ struct HubView: View {
         case infrared
         case nikita
         case cli
+        case scanViewer
     }
 
     var body: some View {
@@ -29,6 +30,11 @@ struct HubView: View {
                     } label: {
                         CLIHubCard()
                     }
+                    Button {
+                        path.append(Destination.scanViewer)
+                    } label: {
+                        ScanViewerHubCard()
+                    }
                 }
                 .padding(14)
             }
@@ -46,6 +52,7 @@ struct HubView: View {
                 case .infrared: InfraredView()
                 case .nikita: NikitaView()
                 case .cli: FlipperCLIView()
+                case .scanViewer: ScanViewerView()
                 }
             }
         }

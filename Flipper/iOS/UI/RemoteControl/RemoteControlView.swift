@@ -59,6 +59,7 @@ struct RemoteControlView: View {
 
     @State private var isHorizontal = false
     @State private var showOutdatedAlert = false
+    @State private var showScanViewer = false
 
     // How deep into menus the user has navigated from the desktop: OK/enter goes
     // one level in, Back one level out. Lock uses this to climb all the way back
@@ -135,6 +136,14 @@ struct RemoteControlView: View {
                 Spacer(minLength: 0)
 
                 DeviceControls { key, isLong in
+                    // Hold the LEFT arrow to open the Scan Viewer tool. It is a
+                    // pushed screen -- Back returns to the remote as usual. Tap
+                    // still sends a normal left to the Flipper; only the
+                    // rarely-used HELD left is repurposed here.
+                    if key == .left && isLong {
+                        showScanViewer = true
+                        return
+                    }
                     trackDepth(key)
                     controlTapped(.inputKey(key, isLong))
                 }
@@ -150,6 +159,11 @@ struct RemoteControlView: View {
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.background)
+        .fullScreenCover(isPresented: $showScanViewer) {
+            NavigationStack {
+                ScanViewerView(showsClose: true)
+            }
+        }
         // Screenshot + Lock/Unlock, top-right. The tab bar below is the
         // navigation, so there is no back button here.
         .overlay(alignment: .topTrailing) {
