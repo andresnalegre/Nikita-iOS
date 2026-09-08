@@ -179,12 +179,18 @@ struct ScanViewerView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
-            Image(systemName: "dot.radiowaves.left.and.right")
-                .font(.system(size: 16, weight: .bold))
-                .foregroundColor(.a1)
+            // Title chip -- echoes the file browser's "Browser" box, but reads
+            // VIEWER and tracks the context (the scanned OS) dynamically.
             Text(model.contextTitle)
                 .font(.system(size: 15, weight: .heavy, design: .monospaced))
                 .foregroundColor(.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.groupedBackground)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.a1, lineWidth: 2))
+                .cornerRadius(8)
             Spacer()
             statusDot
         }
