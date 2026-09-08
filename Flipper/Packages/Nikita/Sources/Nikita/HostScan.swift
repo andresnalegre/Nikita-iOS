@@ -87,6 +87,27 @@ public struct HostScan: Sendable, Equatable {
             firstDeviceDescWLength: num("first_dev_wlen"))
     }
 
+    // Build from the Flipper's RPC device_info properties (read over BLE, no
+    // bridge). The firmware emits usb.host.* keys; returns nil when they are
+    // absent (older firmware) so the caller can say "update the firmware".
+    public static func fromProperties(_ props: [String: String]) -> HostScan? {
+        guard props.keys.contains(where: { $0.hasPrefix("usb.host.") }) else {
+            return nil
+        }
+        func flag(_ k: String) -> Bool { props["usb.host." + k] == "1" }
+        func num(_ k: String) -> Int { Int(props["usb.host." + k] ?? "") ?? 0 }
+        return HostScan(
+            os: OS(rawValue: props["usb.host.os"] ?? "unknown") ?? .unknown,
+            msOsStringRequested: flag("msos"),
+            serialRequested: flag("serial"),
+            productRequested: flag("product"),
+            manufRequested: flag("manuf"),
+            deviceDescRequests: num("devdesc"),
+            configDescRequests: num("cfgdesc"),
+            stringRequests: num("strreq"),
+            firstDeviceDescWLength: num("firstwlen"))
+    }
+
     // The shape the scan_viewer tool hands back to the model.
     public var toolPayload: [String: Any] {
         [

@@ -87,13 +87,19 @@ struct ScanViewerView: View {
                 noticePanel(
                     icon: "exclamationmark.triangle.fill",
                     title: "Scan failed", message: message)
-            } else if case .noBridge = model.state {
+            } else if case .notConnected = model.state {
                 noticePanel(
-                    icon: "cable.connector.slash",
-                    title: "No bridge",
-                    message: "Plug the Flipper into the computer and "
-                        + "run  python3 bridge.py --mailbox  so the "
-                        + "Viewer can read the host it is attached to.")
+                    icon: "wave.3.right.circle",
+                    title: "No Flipper",
+                    message: "Connect a Flipper over Bluetooth. The Viewer reads "
+                        + "the host it is plugged into straight off the device.")
+            } else if case .oldFirmware = model.state {
+                noticePanel(
+                    icon: "arrow.down.circle",
+                    title: "Update the firmware",
+                    message: "This Flipper's firmware doesn't publish the USB host "
+                        + "fingerprint yet. Update to the latest Nikita firmware "
+                        + "and reconnect.")
             }
             rescanButton
         }
@@ -349,14 +355,15 @@ final class ScanViewerModel: ObservableObject {
     enum State: Equatable {
         case idle
         case scanning
-        case noBridge
+        case notConnected
+        case oldFirmware
         case error(String)
         case result(HostScan, raw: String)
     }
 
     @Published private(set) var state: State = .idle
 
-    private let machine = MailboxMachineBridge()
+    private var deps: Core.Dependencies { .shared }
     private var task: Task<Void, Never>?
 
     var isScanning: Bool { if case .scanning = state { return true }; return false }
@@ -365,19 +372,34 @@ final class ScanViewerModel: ObservableObject {
         if case .idle = state { scan() }
     }
 
+    // Read the host fingerprint straight from the Flipper over BLE -- the
+    // firmware publishes it as usb.host.* device_info properties, so whatever the
+    // Flipper sees plugged in, the phone sees too. No bridge, no cable.
     func scan() {
         task?.cancel()
         state = .scanning
         task = Task { [weak self] in
             guard let self else { return }
-            guard await self.machine.isBridgeConnected else {
-                if !Task.isCancelled { self.state = .noBridge }
+            let connected: Bool = {
+                switch self.deps.device.status {
+                case .connected, .synchronizing, .synchronized: return true
+                default: return false
+                }
+            }()
+            guard connected else {
+                if !Task.isCancelled { self.state = .notConnected }
                 return
             }
             do {
-                let raw = try await self.machine.send("nikita host")
+                var props: [String: String] = [:]
+                let stream = await self.deps.nikitaSystem.deviceInfo()
+                for try await (key, value) in stream { props[key] = value }
                 if Task.isCancelled { return }
-                self.state = .result(HostScan.parse(raw), raw: raw)
+                guard let scan = HostScan.fromProperties(props) else {
+                    self.state = .oldFirmware
+                    return
+                }
+                self.state = .result(scan, raw: Self.rawText(scan))
             } catch {
                 if Task.isCancelled { return }
                 self.state = .error("\(error)")
@@ -385,11 +407,27 @@ final class ScanViewerModel: ObservableObject {
         }
     }
 
+    // Reconstruct the key=value block for the raw panel from the parsed scan.
+    private static func rawText(_ s: HostScan) -> String {
+        """
+        os=\(s.os.rawValue)
+        ms_os_string=\(s.msOsStringRequested ? 1 : 0)
+        serial_req=\(s.serialRequested ? 1 : 0)
+        product_req=\(s.productRequested ? 1 : 0)
+        manuf_req=\(s.manufRequested ? 1 : 0)
+        device_desc_req=\(s.deviceDescRequests)
+        config_desc_req=\(s.configDescRequests)
+        string_req=\(s.stringRequests)
+        first_dev_wlen=\(s.firstDeviceDescWLength)
+        """
+    }
+
     // The dynamic header line, echoing the browser's folder-name behaviour.
     var contextTitle: String {
         switch state {
         case .idle, .scanning: return "VIEWER"
-        case .noBridge: return "VIEWER / offline"
+        case .notConnected: return "VIEWER / offline"
+        case .oldFirmware: return "VIEWER / update"
         case .error: return "VIEWER / error"
         case let .result(scan, _): return "VIEWER / \(scan.os.rawValue)"
         }
@@ -399,7 +437,8 @@ final class ScanViewerModel: ObservableObject {
         switch state {
         case .idle: return "READY"
         case .scanning: return "SCANNING"
-        case .noBridge: return "NO BRIDGE"
+        case .notConnected: return "NO FLIPPER"
+        case .oldFirmware: return "OLD FW"
         case .error: return "ERROR"
         case .result: return "LOCKED"
         }
@@ -408,7 +447,7 @@ final class ScanViewerModel: ObservableObject {
     var statusColor: Color {
         switch state {
         case .result: return .sGreenUpdate
-        case .error, .noBridge: return .sYellow
+        case .error, .notConnected, .oldFirmware: return .sYellow
         default: return .black40
         }
     }
@@ -417,7 +456,7 @@ final class ScanViewerModel: ObservableObject {
         switch state {
         case .scanning: return "SCANNING"
         case .idle: return "IDLE"
-        case .noBridge, .error: return "—"
+        case .notConnected, .oldFirmware, .error: return "—"
         case let .result(scan, _):
             switch scan.os {
             case .windows: return "WINDOWS"
@@ -430,9 +469,10 @@ final class ScanViewerModel: ObservableObject {
 
     var osSubtitle: String {
         switch state {
-        case .scanning: return "reading how the host enumerated us…"
+        case .scanning: return "reading the fingerprint over Bluetooth…"
         case .idle: return "pull the fingerprint"
-        case .noBridge: return "bridge needed to read the host"
+        case .notConnected: return "connect a Flipper to scan its host"
+        case .oldFirmware: return "update the firmware to read the host"
         case .error: return "could not reach the Flipper"
         case let .result(scan, _): return scan.summary
         }

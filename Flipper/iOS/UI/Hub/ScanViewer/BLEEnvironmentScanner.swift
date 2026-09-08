@@ -65,12 +65,14 @@ final class BLEEnvironmentScanner: NSObject, ObservableObject {
         } else {
             beginScanIfReady()
         }
-        // Drop devices we have not heard from in a while so the list reflects
-        // what is actually around right now.
+        // Republish on a fixed 1 Hz tick, NOT on every advertisement packet.
+        // With AllowDuplicates the radio fires many times a second; sorting and
+        // re-publishing on each one made rows jump and flicker. Batching to 1 Hz
+        // (and pruning only after 30s of silence) keeps the list calm and stable.
         pruneTimer?.invalidate()
-        pruneTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) {
+        pruneTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) {
             [weak self] _ in
-            Task { @MainActor in self?.prune() }
+            Task { @MainActor in self?.tick() }
         }
     }
 
@@ -94,8 +96,10 @@ final class BLEEnvironmentScanner: NSObject, ObservableObject {
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
     }
 
-    private func prune() {
-        let cutoff = Date().addingTimeInterval(-10)
+    // One batched UI update per second: drop the long-silent, then publish a
+    // stably ordered snapshot.
+    private func tick() {
+        let cutoff = Date().addingTimeInterval(-30)
         for (id, dev) in seen where dev.lastSeen < cutoff {
             seen[id] = nil
         }
@@ -103,7 +107,13 @@ final class BLEEnvironmentScanner: NSObject, ObservableObject {
     }
 
     private func publish() {
-        devices = seen.values.sorted { $0.rssi > $1.rssi }
+        // Order by signal, but break ties on the id so equal-RSSI rows never
+        // swap places between ticks -- the list stays put unless signal really
+        // changes. (RSSI is already smoothed in ingest.)
+        devices = seen.values.sorted {
+            $0.rssi != $1.rssi ? $0.rssi > $1.rssi
+                : $0.id.uuidString < $1.id.uuidString
+        }
     }
 }
 
@@ -152,25 +162,29 @@ extension BLEEnvironmentScanner: CBCentralManagerDelegate {
     ) {
         // -127 is CoreBluetooth's "no reading"; skip so it never tops the list.
         guard rssi != 127, rssi != -127 else { return }
-        let display = name.isEmpty ? "(unnamed)" : name
+        let existing = seen[id]
+        // Smooth RSSI so the bars don't twitch every packet.
+        let smoothed: Int
+        if let prev = existing?.rssi {
+            smoothed = Int((Double(prev) * 0.7 + Double(rssi) * 0.3).rounded())
+        } else {
+            smoothed = rssi
+        }
+        // Keep the best name/category/services we have ever seen for this id --
+        // ads alternate between rich and bare packets.
+        let display = name.isEmpty ? (existing?.name ?? "(unnamed)") : name
         let category = Self.classify(
             name: name, services: services, hasAppleMfg: hasAppleMfg)
-        // Keep the best name we have ever seen for this id (ads alternate
-        // between named and unnamed packets).
-        var existingName = seen[id]?.name
-        if existingName == nil || existingName == "(unnamed)" {
-            existingName = display
-        } else if !name.isEmpty {
-            existingName = display
-        }
         seen[id] = Device(
-            id: id, name: existingName ?? display, rssi: rssi,
-            category: category == .unknown ? (seen[id]?.category ?? .unknown)
+            id: id,
+            name: display,
+            rssi: smoothed,
+            category: category == .unknown ? (existing?.category ?? .unknown)
                 : category,
-            serviceUUIDs: services.isEmpty ? (seen[id]?.serviceUUIDs ?? [])
+            serviceUUIDs: services.isEmpty ? (existing?.serviceUUIDs ?? [])
                 : services,
             lastSeen: Date())
-        publish()
+        // Do NOT publish here -- the 1 Hz tick batches UI updates.
     }
 
     // Best-effort category from the advertised name, GATT services and Apple
