@@ -26,6 +26,13 @@ struct ScanViewerView: View {
                                       case nearby = "Nearby (BLE)" }
     @State private var mode: Mode = .host
 
+    struct SignalInfo: Identifiable {
+        let id = UUID()
+        let title: String
+        let body: String
+    }
+    @State private var info: SignalInfo?
+
     var body: some View {
         ZStack {
             Color.background.ignoresSafeArea()
@@ -73,6 +80,52 @@ struct ScanViewerView: View {
         .onChange(of: mode) { newMode in
             if newMode == .nearby { ble.start() } else { ble.stop() }
         }
+        .sheet(item: $info) { info in infoSheet(info) }
+    }
+
+    // Show info sheet -- the plain-language meaning of a tapped signal.
+    private func infoSheet(_ info: SignalInfo) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text(info.title)
+                    .font(.system(size: 18, weight: .heavy, design: .monospaced))
+                    .foregroundColor(.primary)
+                Spacer()
+                Button { self.info = nil } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 22))
+                        .foregroundColor(.black30)
+                }
+            }
+            Text(info.body)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer()
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color.background.ignoresSafeArea())
+        .presentationDetents([.height(240)])
+    }
+
+    // MARK: Deep recon -- the last active-recon capture, read over BLE.
+
+    private func deepReconPanel(_ recon: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            panelTitle("DEEP RECON (from the Flipper)")
+            Text(recon)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundColor(.a1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(Color.black.opacity(0.85))
+                .cornerRadius(8)
+                .textSelection(.enabled)
+        }
+        .padding(14)
+        .background(Color.groupedBackground)
+        .cornerRadius(12)
     }
 
     // MARK: Host (USB) tab
@@ -82,6 +135,9 @@ struct ScanViewerView: View {
             verdictPanel
             if case let .result(scan, raw) = model.state {
                 signalsPanel(scan)
+                if let recon = model.deepRecon {
+                    deepReconPanel(recon)
+                }
                 rawPanel(raw)
             } else if case let .error(message) = model.state {
                 noticePanel(
@@ -262,18 +318,60 @@ struct ScanViewerView: View {
 
     private func signalRow(_ name: String, _ value: String, strong: Bool = false)
         -> some View {
-        HStack {
-            Text(name)
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundColor(.black40)
-            Spacer()
-            Text(value)
-                .font(.system(size: 13, weight: strong ? .bold : .regular,
-                              design: .monospaced))
-                .foregroundColor(strong ? .a1 : .primary)
+        Button {
+            info = SignalInfo(title: name, body: Self.describe(name))
+        } label: {
+            HStack(spacing: 8) {
+                Text(name)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundColor(.black40)
+                Spacer()
+                Text(value)
+                    .font(.system(size: 13, weight: strong ? .bold : .regular,
+                                  design: .monospaced))
+                    .foregroundColor(strong ? .a1 : .primary)
+                Image(systemName: "info.circle")
+                    .font(.system(size: 11))
+                    .foregroundColor(.black40)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 7)
+        .buttonStyle(.plain)
+    }
+
+    // Show info -- plain-language meaning of each signal (matches the device).
+    static func describe(_ name: String) -> String {
+        switch name {
+        case "MS OS string (0xEE)":
+            return "Only Windows fetches the Microsoft OS String Descriptor at "
+                + "string index 0xEE during enumeration. yes = Windows; no = "
+                + "macOS or Linux."
+        case "serial string":
+            return "Did the host read our serial-number string? macOS pulls it "
+                + "while enumerating; the Linux cdc_acm path usually does not."
+        case "product string":
+            return "Did the host read our product string? Together with the "
+                + "serial string, a strong macOS tell."
+        case "manufacturer string":
+            return "Did the host read our manufacturer string?"
+        case "device desc requests":
+            return "How many times the host asked for the DEVICE descriptor. "
+                + "Some OSes ask twice: a short probe, then the full read."
+        case "config desc requests":
+            return "How many times the host asked for the CONFIGURATION "
+                + "descriptor."
+        case "string requests":
+            return "Total string-descriptor reads. macOS is chatty here; a "
+                + "minimal host asks for very few."
+        case "first device wLength":
+            return "Length the host asked for on the FIRST device-descriptor "
+                + "read: 64 points to Linux, 8 to macOS/Windows."
+        default:
+            return "A signal from how the host enumerated the Flipper. A device "
+                + "can't read its host, so the OS is inferred from these."
+        }
     }
 
     // MARK: Raw output -- the terminal block.
@@ -362,6 +460,9 @@ final class ScanViewerModel: ObservableObject {
     }
 
     @Published private(set) var state: State = .idle
+    // The last DEEP SCAN the Flipper ran (recon.txt), read over BLE. nil until a
+    // deep scan has been run on the device (hold LEFT -> Viewer -> DEEP SCAN).
+    @Published private(set) var deepRecon: String?
 
     private var deps: Core.Dependencies { .shared }
     private var task: Task<Void, Never>?
@@ -400,11 +501,27 @@ final class ScanViewerModel: ObservableObject {
                     return
                 }
                 self.state = .result(scan, raw: Self.rawText(scan))
+                self.deepRecon = try? await self.readRecon()
             } catch {
                 if Task.isCancelled { return }
                 self.state = .error("\(error)")
             }
         }
+    }
+
+    // Read the last deep-scan capture the Flipper wrote, over BLE. Best-effort:
+    // absent file (no deep scan yet) just returns nil.
+    private func readRecon() async throws -> String? {
+        var bytes: [UInt8] = []
+        let stream = await deps.nikitaStorage.read(
+            at: .init(string: "/ext/nikita/recon.txt"))
+        for try await chunk in stream {
+            bytes.append(contentsOf: chunk)
+            if bytes.count > 8 * 1024 { break }
+        }
+        let text = String(decoding: bytes, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     // Reconstruct the key=value block for the raw panel from the parsed scan.
