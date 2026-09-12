@@ -71,7 +71,7 @@ extension URL {
 //     Official.
 //
 // Fork first, version as the fallback.
-public enum FirmwareIdentity {
+public enum FirmwareIdentity: CaseIterable, Equatable {
     case nikita, official, momentum, unleashed, rogueMaster, arf, xero
 
     public static func identify(fork: String?, version: String?) -> Self? {

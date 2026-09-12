@@ -117,6 +117,7 @@ extension DeviceUpdateCard {
                 // say it is a newer build of what is running, so it must not
                 // inherit that claim from a previous import.
                 updateModel.customIsSameFirmware = false
+                updateModel.customFirmwareIdentity = nil
                 updateModel.customFirmware = firmware
                 startUpdate()
             }
@@ -126,6 +127,7 @@ extension DeviceUpdateCard {
             if let firmware = Update.Firmware(decodingWebURL: url) {
                 updateChannel = .custom
                 updateModel.customIsSameFirmware = false
+                updateModel.customFirmwareIdentity = nil
                 updateModel.customFirmware = firmware
                 startUpdate()
             }

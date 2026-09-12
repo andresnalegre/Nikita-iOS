@@ -20,6 +20,14 @@ public class UpdateModel: ObservableObject {
     // different one. Both travel the custom channel, but they are not the same
     // act, and the card should not call an update an install.
     @Published public var customIsSameFirmware = false
+    // Which firmware an Import selection actually IS (Nikita / Momentum / ...),
+    // so "is this the firmware already on the device" can be answered live
+    // against whatever is installed right now -- not frozen at the moment of
+    // import. Without this, importing Momentum while on Nikita froze the answer
+    // at "different", and the card kept shouting INSTALL even after
+    // Momentum was flashed and the device WAS on it. nil for a hand-picked
+    // .tgz, whose firmware cannot be named.
+    @Published public var customFirmwareIdentity: FirmwareIdentity?
     @Published public var updateChannel: Update.Channel = .load() {
         didSet {
             if updateChannel != .custom {
@@ -295,6 +303,7 @@ public class UpdateModel: ObservableObject {
         FirmwareFeed.current = url
         manifest = nil
         customIsSameFirmware = false
+        customFirmwareIdentity = nil
         return true
     }
 
@@ -431,13 +440,16 @@ public class UpdateModel: ObservableObject {
 
         // Imported firmware always travels the custom channel, so its channel
         // can never equal the device's -- the release check below would send it
-        // straight to an update every time, which is why the card kept offering
-        // INSTALL for the very build already on the Flipper. Decide it on its
-        // own terms instead, and terminally: a different firmware is always an
-        // install; the same firmware is an update only when the build differs,
-        // and otherwise there is nothing to do.
+        // straight to an update every time. Decide it on its own terms, and
+        // against what is installed RIGHT NOW: whether the picked firmware is
+        // the one already on the device is asked live (identity), never from a
+        // snapshot taken at import time -- that snapshot is why the card kept
+        // shouting INSTALL after a flash.
         if updateChannel == .custom {
-            guard customIsSameFirmware else {
+            let sameFirmware = customFirmwareIdentity != nil
+                && installedFirmware == customFirmwareIdentity
+            guard sameFirmware else {
+                // A different firmware than the one running: install it.
                 state = .ready(.channelUpdate)
                 return false
             }
@@ -449,6 +461,7 @@ public class UpdateModel: ObservableObject {
                 // update -- so it never appears on the default channel.
                 state = .ready(.reinstall)
             } else {
+                // Same firmware, a different build -- a real update.
                 state = .ready(.versionUpdate)
             }
             return false

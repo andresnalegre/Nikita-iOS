@@ -422,6 +422,11 @@ struct FirmwareImportView: View {
         deps.updateModel.customFirmware = firmware
         // Same firmware, newer build: the card should offer UPDATE, not INSTALL.
         deps.updateModel.customIsSameFirmware = isInstalled(source)
+        // The firmware this selection IS, so the card can tell -- live, after a
+        // flash -- whether the device is now running it. Maps the store's row
+        // name to the identity the device reports.
+        deps.updateModel.customFirmwareIdentity =
+            FirmwareIdentity.allCases.first { $0.displayName == source.name }
         deps.updateModel.updateChannel = .custom
         dismiss()
     }
