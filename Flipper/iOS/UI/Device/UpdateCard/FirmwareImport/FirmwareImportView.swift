@@ -130,7 +130,13 @@ final class FirmwareCatalog: ObservableObject {
         guard let url = URL(string: source.locator) else {
             throw Err.badURL
         }
-        let (data, _) = try await URLSession.shared.data(from: url)
+        // Ignore any cached copy: raw.githubusercontent sends max-age=300, so
+        // a plain fetch could keep showing the previous release for minutes
+        // after a new one is out -- which is exactly how a fresh nkt build did
+        // not appear in Import.
+        var request = URLRequest(url: url)
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        let (data, _) = try await URLSession.shared.data(for: request)
         guard
             let root = try JSONSerialization.jsonObject(with: data)
                 as? [String: Any],
@@ -206,6 +212,7 @@ final class FirmwareCatalog: ObservableObject {
         var request = URLRequest(url: url)
         request.setValue("application/vnd.github+json",
                          forHTTPHeaderField: "Accept")
+        request.cachePolicy = .reloadIgnoringLocalCacheData
         let (data, _) = try await URLSession.shared.data(for: request)
         guard let releases = try JSONSerialization.jsonObject(with: data)
             as? [[String: Any]] else { throw Err.notFound }

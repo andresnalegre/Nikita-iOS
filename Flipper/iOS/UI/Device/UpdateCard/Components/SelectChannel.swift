@@ -61,14 +61,19 @@ struct SelectChannelButton: View {
         case .development: return "Dev \(version.name)"
         case .candidate: return "RC \(version.name.dropLast(3))"
         case .release: return "Release \(version.name)"
-        // Once something has been imported, its name is the useful label --
-        // "Custom" named the mechanism rather than the firmware, so a row that
-        // had just been chosen from the store gave no sign of which one it was.
-        // Before an import there is nothing to name, so the word stands.
+        // Imported firmware reads by its own name, never "Custom" -- that named
+        // the mechanism, not the firmware. The firmware family comes from the
+        // version tag (Nikita, Momentum, ...); an unnamed hand-picked file
+        // falls back to a neutral word rather than the internal channel name.
         case .custom:
-            return version.name.isEmpty || version.name == "unknown"
-                ? "Custom"
-                : version.name
+            if version.name.isEmpty || version.name == "unknown" {
+                return "Firmware"
+            }
+            if let fw = FirmwareIdentity.identify(
+                fork: nil, version: version.name) {
+                return "\(fw.displayName) \(version.name)"
+            }
+            return version.name
         }
     }
 

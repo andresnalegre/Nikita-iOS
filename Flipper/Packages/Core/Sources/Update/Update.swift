@@ -114,7 +114,15 @@ extension Update.Version: CustomStringConvertible {
         case .development: return "Dev \(name)"
         case .candidate: return "RC \(name.dropLast(3))"
         case .release: return "Release \(name)"
-        case .custom: return "Custom \(name)"
+        // Never the word "Custom". Imported firmware travels the custom channel
+        // internally, but to the user it is a named firmware -- so it reads by
+        // that name (Nikita, Momentum, Unleashed, ...), taken from the version
+        // tag it carries. A hand-picked .tgz we cannot name shows the bare tag.
+        case .custom:
+            if let fw = FirmwareIdentity.identify(fork: nil, version: name) {
+                return "\(fw.displayName) \(name)"
+            }
+            return name
         }
     }
 }

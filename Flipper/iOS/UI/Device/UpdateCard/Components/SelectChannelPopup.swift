@@ -54,9 +54,9 @@ struct SelectChannelPopup: View {
                     // Always offered, whatever the feed holds: these are how
                     // you leave this firmware rather than pick a stream of it.
                     ChannelMenuRow(
-                        title: "Custom",
+                        title: "From file",
                         color: .custom,
-                        description: "Upload file with custom firmware",
+                        description: "Upload a firmware .tgz file",
                         onPress: { onChannelSelected(.custom) }
                     )
                     .padding(12)

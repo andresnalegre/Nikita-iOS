@@ -392,7 +392,15 @@ public class UpdateModel: ObservableObject {
         else {
             return true
         }
-        switch intent.desiredVersion == installed {
+        // Match on the version NAME, not the whole Version. Imported firmware
+        // is asked for on the custom channel, but once flashed the device
+        // reports its own real channel (nkt-009 comes back as Release), so a
+        // full-Version compare read a perfectly good install as failed --
+        // "Custom nkt-009 wasn't installed" over a device sitting on exactly
+        // nkt-009. The build name is what actually says the flash took.
+        let installedOK = intent.desiredVersion.name
+            .caseInsensitiveCompare(installed.name) == .orderedSame
+        switch installedOK {
         case true: state = .update(.result(.succeeded))
         case false: state = .update(.result(.failed))
         }
