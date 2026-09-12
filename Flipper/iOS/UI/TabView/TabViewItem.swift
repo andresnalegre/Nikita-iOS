@@ -4,61 +4,36 @@ struct TabViewItem: View {
     let image: AnyView
     let name: String
     let isSelected: Bool
-    // Shared with every sibling item so the selection pill can travel from one
-    // tab to the next as a single moving shape, rather than fading out here and
-    // in again there. This is the "easy movement" the bar was missing.
-    let namespace: Namespace.ID
     let onItemSelected: () -> Void
 
-    // Selection now reads three ways at once, each doing a different job:
+    // Selection is carried by colour alone: no pill, no glow, no outline.
+    // Everything that used to be painted behind the icon and the label has
+    // gone -- a tinted slab under one tab was the loudest thing in the bar, and
+    // a coloured glyph beside four grey ones already says which tab you are on.
+    // The caller tints this item with foregroundColor, which is also how the
+    // device tab turns red on a fault.
     //
-    //   * a soft magenta pill that SLIDES between tabs (matchedGeometryEffect),
-    //     carrying the eye from the old tab to the new one;
-    //   * depth -- the pill sits on a faint magenta glow and a hairline top
-    //     highlight, so the selected tab looks lifted rather than painted flat;
-    //   * the small spring lift and the caller's colour tint, kept from before.
-    //
-    // The pill is deliberately low-contrast (a tint, not a slab): it says which
-    // tab you are on without shouting over the four grey ones.
+    // The small lift on selection stays: it reads as movement rather than as
+    // another painted shape.
 
     var body: some View {
-        VStack(spacing: 2) {
-            image
+        VStack(spacing: 0) {
+            VStack(spacing: 2) {
+                image
 
-            Text(name)
-                .lineLimit(1)
-                .font(.system(size: 10, weight: .bold))
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .frame(minWidth: 69, minHeight: 46)
-        .background {
-            if isSelected {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(Color.a1.opacity(0.14))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(
-                                LinearGradient(
-                                    colors: [
-                                        .a1.opacity(0.55),
-                                        .a1.opacity(0.05)
-                                    ],
-                                    startPoint: .top,
-                                    endPoint: .bottom),
-                                lineWidth: 1)
-                    }
-                    .shadow(color: .a1.opacity(0.45), radius: 8, y: 2)
-                    .matchedGeometryEffect(id: "tabIndicator", in: namespace)
+                Text(name)
+                    .lineLimit(1)
+                    .font(.system(size: 10, weight: .bold))
             }
+            .padding(.horizontal, 7)
+            .frame(minWidth: 69, minHeight: 46)
+            .scaleEffect(isSelected ? 1.06 : 1)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onItemSelected()
+            }
+            .animation(.spring(response: 0.34, dampingFraction: 0.7), value: isSelected)
         }
-        .scaleEffect(isSelected ? 1.06 : 1)
-        .contentShape(Rectangle())
-        .onTapGesture {
-            onItemSelected()
-        }
-        .animation(
-            .spring(response: 0.34, dampingFraction: 0.7),
-            value: isSelected)
+        .frame(maxWidth: .infinity)
     }
 }
