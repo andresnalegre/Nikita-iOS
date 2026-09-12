@@ -13,6 +13,9 @@ struct TabView: View {
 
     @AppStorage(.hasReaderLog) var hasReaderLog = false
 
+    // Shared id space for the sliding selection pill in the tab bar.
+    @Namespace private var tabNamespace
+
     var hasAppUpdates: Bool {
         applications.outdatedCount > 0
     }
@@ -61,7 +64,8 @@ struct TabView: View {
                 TabViewItem(
                     image: deviceImage,
                     name: deviceTabName,
-                    isSelected: selected == .device
+                    isSelected: selected == .device,
+                    namespace: tabNamespace
                 ) {
                     handleTap(on: .device)
                 }
@@ -72,7 +76,8 @@ struct TabView: View {
                 TabViewItem(
                     image: remoteImage,
                     name: "Remote",
-                    isSelected: selected == .remote
+                    isSelected: selected == .remote,
+                    namespace: tabNamespace
                 ) {
                     handleTap(on: .remote)
                 }
@@ -83,7 +88,8 @@ struct TabView: View {
                 TabViewItem(
                     image: appsImage,
                     name: "Apps",
-                    isSelected: selected == .apps
+                    isSelected: selected == .apps,
+                    namespace: tabNamespace
                 ) {
                     handleTap(on: .apps)
                 }
@@ -97,15 +103,22 @@ struct TabView: View {
                 TabViewItem(
                     image: hubImage,
                     name: "Tools",
-                    isSelected: selected == .hub
+                    isSelected: selected == .hub,
+                    namespace: tabNamespace
                 ) {
                     handleTap(on: .hub)
                 }
                 .foregroundColor(hubColor)
             }
             .padding(3)
+            .animation(
+                .spring(response: 0.34, dampingFraction: 0.72),
+                value: selected)
         }
         .background(.surfaceBottomBarBody)
+        // Lift the whole bar off the content above it: a soft dark shadow
+        // cast upward reads as the bar floating over the screen.
+        .shadow(color: .black.opacity(0.35), radius: 10, y: -3)
     }
 
     // MARK: Analytics
