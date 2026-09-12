@@ -43,18 +43,23 @@ struct DeviceView: View {
         device.stopScreenStreaming()
     }
 
-    // Re-assert the stream every couple of seconds, the same way the remote
-    // control does. A BLE hiccup restarts the RPC session and the Flipper
-    // forgets it was streaming; asking once meant the mirror showed the last
-    // frame that arrived and then sat there, which looked like a screenshot
-    // rather than a screen.
+    // Check every couple of seconds, the same way the remote control does, and
+    // re-assert only when the frames have stopped. A BLE hiccup restarts the
+    // RPC session and the Flipper forgets it was streaming; asking once meant
+    // the mirror showed the last frame that arrived and then sat there, which
+    // looked like a screenshot rather than a screen. Asking unconditionally
+    // was the other extreme -- an "already started" error and a wasted round
+    // trip every two seconds, on the link syncing and updates also use.
     private func startMirrorKeepAlive() {
         mirrorKeepAlive?.cancel()
         mirrorKeepAlive = Task { @MainActor in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled else { break }
-                if isActive, canMirrorScreen, scenePhase == .active {
+                if
+                    isActive, canMirrorScreen, scenePhase == .active,
+                    device.isScreenStreamStale()
+                {
                     device.startScreenStreaming()
                 }
             }

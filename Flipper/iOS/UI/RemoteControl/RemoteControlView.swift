@@ -361,14 +361,18 @@ struct RemoteControlView: View {
     // Re-assert the screen stream while the remote is open and the Flipper is
     // connected, so a BLE/pairing hiccup that restarts the RPC session (and
     // clears the Flipper's streaming state) self-heals within a couple seconds
-    // instead of freezing until a manual reconnect.
+    // instead of freezing until a manual reconnect. Only when the frames have
+    // actually stopped: a live stream answers a second start with an error.
     func startStreamKeepAlive() {
         streamKeepAlive?.cancel()
         streamKeepAlive = Task { @MainActor in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 guard !Task.isCancelled else { break }
-                if device.status == .connected, scenePhase == .active {
+                if
+                    device.status == .connected, scenePhase == .active,
+                    device.isScreenStreamStale()
+                {
                     device.startScreenStreaming()
                 }
             }

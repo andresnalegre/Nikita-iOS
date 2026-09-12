@@ -22,6 +22,14 @@ public class Device: ObservableObject {
     @Published public var storageInfo: StorageInfo?
     @Published public private(set) var frame: ScreenFrame?
 
+    // When the last screen frame arrived. The stream keep-alives read it to
+    // tell a running stream from one the Flipper forgot after a session
+    // restart: frames land several times a second while it is live, so silence
+    // is the only honest signal that the stream is gone. Re-asserting one that
+    // is already running just earns an error back and spends a round trip on
+    // the single BLE link that syncing and updates also share.
+    @Published public private(set) var lastFrameAt: Date?
+
     @Published public private(set) var info: Info = .init()
     @Published public private(set) var isInfoReady = false
 
@@ -63,6 +71,7 @@ public class Device: ObservableObject {
             while !Task.isCancelled {
                 for await frame in await gui.screenFrame {
                     self.frame = frame
+                    self.lastFrameAt = .init()
                 }
             }
         }
@@ -220,8 +229,26 @@ public class Device: ObservableObject {
         }
     }
 
+    // True when no frame has arrived for `seconds`. A live stream is never
+    // quiet that long, so this is what the keep-alives ask before spending a
+    // request on re-asserting it.
+    public func isScreenStreamStale(
+        after seconds: TimeInterval = 2
+    ) -> Bool {
+        guard let lastFrameAt else { return true }
+        return Date().timeIntervalSince(lastFrameAt) > seconds
+    }
+
+    private var screenStreamStart: Task<Void, Never>?
+
     public func startScreenStreaming() {
-        Task {
+        // One request in flight at a time. onAppear, the status change and the
+        // keep-alive can all land in the same moment, and a second
+        // screenStream(true) while the first is still out only comes back as
+        // "Virtual Display is already started".
+        guard screenStreamStart == nil else { return }
+        screenStreamStart = Task {
+            defer { screenStreamStart = nil }
             do {
                 try await gui.startStreaming()
             } catch {
@@ -232,6 +259,9 @@ public class Device: ObservableObject {
     }
 
     public func stopScreenStreaming() {
+        screenStreamStart?.cancel()
+        screenStreamStart = nil
+        lastFrameAt = nil
         Task {
             do {
                 try await gui.stopStreaming()
