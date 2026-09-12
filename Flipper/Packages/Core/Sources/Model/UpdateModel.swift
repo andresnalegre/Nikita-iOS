@@ -63,6 +63,11 @@ public class UpdateModel: ObservableObject {
             case noUpdates
             case versionUpdate
             case channelUpdate
+            // The exact firmware already on the device, chosen again from
+            // Import. Not an update -- a deliberate reflash -- so it is offered
+            // (you may need it) but never shown as an available update on the
+            // default channel, which is what "no updates" is for.
+            case reinstall
         }
 
         public enum Update: Equatable, Codable, Hashable {
@@ -423,13 +428,36 @@ public class UpdateModel: ObservableObject {
         guard let installed = installed else {
             return false
         }
+
+        // Imported firmware always travels the custom channel, so its channel
+        // can never equal the device's -- the release check below would send it
+        // straight to an update every time, which is why the card kept offering
+        // INSTALL for the very build already on the Flipper. Decide it on its
+        // own terms instead, and terminally: a different firmware is always an
+        // install; the same firmware is an update only when the build differs,
+        // and otherwise there is nothing to do.
+        if updateChannel == .custom {
+            guard customIsSameFirmware else {
+                state = .ready(.channelUpdate)
+                return false
+            }
+            if let available = available, installed.name == available.name {
+                // Already on this exact build. Offer a reflash rather than
+                // hiding the button: picking a firmware from Import is a
+                // deliberate act, and reinstalling the same version is a thing
+                // people need (a bad flash, a wiped SD). It is not, however, an
+                // update -- so it never appears on the default channel.
+                state = .ready(.reinstall)
+            } else {
+                state = .ready(.versionUpdate)
+            }
+            return false
+        }
+
         guard installed.channel == updateChannel else {
-            // Changing firmware is an install; taking a newer build of the one
-            // already on the device is an update, whichever channel carries it.
-            state = .ready(
-                updateChannel == .custom && customIsSameFirmware
-                    ? .versionUpdate
-                    : .channelUpdate)
+            // Changing channels is an install; a newer build of the same
+            // channel is handled by the version check that follows.
+            state = .ready(.channelUpdate)
             return false
         }
         return true

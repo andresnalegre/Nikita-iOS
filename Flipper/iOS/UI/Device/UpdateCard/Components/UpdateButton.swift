@@ -10,6 +10,7 @@ struct UpdateButton: View {
         case .noUpdates: return "NO UPDATES"
         case .versionUpdate: return "UPDATE"
         case .channelUpdate: return "INSTALL"
+        case .reinstall: return "REINSTALL"
         }
     }
 
@@ -18,6 +19,7 @@ struct UpdateButton: View {
         case .noUpdates: return .black20
         case .versionUpdate: return .sGreenUpdate
         case .channelUpdate: return .a1
+        case .reinstall: return .a1
         }
     }
 

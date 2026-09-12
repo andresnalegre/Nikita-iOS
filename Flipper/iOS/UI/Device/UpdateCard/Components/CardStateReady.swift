@@ -27,6 +27,9 @@ extension DeviceUpdateCard {
             case .channelUpdate:
                 return "Firmware on Flipper doesn’t match update channel. " +
                     "Selected version will be installed."
+            case .reinstall:
+                return "This firmware is already installed. " +
+                    "It will be flashed again."
             }
         }
 

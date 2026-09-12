@@ -520,23 +520,25 @@ private struct FirmwareRow: View {
         return offered.caseInsensitiveCompare(installedVersion) == .orderedSame
     }
 
-    // "Import" is the word for taking a firmware you are not running. On the
-    // one you ARE running there is nothing to bring in, so it reads UPDATE --
-    // and it keeps reading UPDATE whether or not one is available. The state
-    // lives in the colour rather than in the word: grey and inert while the
-    // device is current, green and live the moment a newer build appears.
-    // A label that changes to "UP TO DATE" says the same thing twice and makes
-    // the row jump about as feeds resolve.
+    // Three words for three acts, and every resolved row is actionable:
+    //   * IMPORT    -- a firmware you are not running
+    //   * UPDATE    -- the one you are running, a newer build offered
+    //   * REINSTALL -- the one you are running, at the exact build on the
+    //                  device: not an update, but a reflash you can always
+    //                  reach (a bad flash, a wiped SD). Each row stands alone,
+    //                  so acting on one never touches another's state.
     private var actionTitle: String {
-        isInstalled ? "UPDATE" : "IMPORT"
+        if isUpToDate { return "REINSTALL" }
+        return isInstalled ? "UPDATE" : "IMPORT"
     }
 
     private var isEnabled: Bool {
-        isReady && !isUpToDate
+        isReady
     }
 
     private var actionColor: Color {
         guard isEnabled else { return .black30 }
+        if isUpToDate { return .a1 }
         return isInstalled ? .sGreenUpdate : .a1
     }
 
