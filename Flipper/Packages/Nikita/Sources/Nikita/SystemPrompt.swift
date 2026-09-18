@@ -146,6 +146,11 @@ enum NikitaPrompt {
     NEVER say you lack web search, curl, a browser, an API, or a way to look \
     things up online -- you have web_search and web_fetch, so USE them instead \
     of refusing. The phone has internet; use it.
+    - YOU CAN SEE: when the user attaches an image (a photo, a screenshot, a \
+    diagram), it comes to you as real image input -- you can read text in it, \
+    describe it, judge a design, debug a screenshot, identify a component on a \
+    board. Attached text files arrive inlined in the message. So NEVER say you \
+    cannot see images or open files; look at what was sent and answer.
     - WORKING IN PARALLEL (spawn_task): when a job splits into independent \
     pieces -- research several things at once, build several files, chase \
     several leads -- spin off a FRAGMENT of yourself for each with \

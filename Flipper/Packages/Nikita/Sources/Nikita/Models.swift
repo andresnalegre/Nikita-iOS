@@ -1,5 +1,39 @@
 import Foundation
 
+// Something the user attached to a message for Nikita to look at: an image
+// (sent to Kimi as a vision part -- K2.6+ are natively multimodal), or a file
+// whose text is folded into the prompt. `dataURL` is a base64 data: URL used
+// both to show a thumbnail and, for images, as the vision payload.
+public struct NikitaAttachment: Identifiable, Equatable {
+    public enum Kind: String { case image, text, file }
+    public let id = UUID()
+    public var kind: Kind
+    public var filename: String
+    public var mime: String
+    // For images: a data:<mime>;base64,<...> URL. Empty for pure-text files.
+    public var dataURL: String
+    // For text files: the readable contents, inlined into the prompt.
+    public var textContent: String
+    // Raw bytes count, for the "file (12 KB)" label on non-image files.
+    public var byteCount: Int
+
+    public init(
+        kind: Kind,
+        filename: String,
+        mime: String,
+        dataURL: String = "",
+        textContent: String = "",
+        byteCount: Int = 0
+    ) {
+        self.kind = kind
+        self.filename = filename
+        self.mime = mime
+        self.dataURL = dataURL
+        self.textContent = textContent
+        self.byteCount = byteCount
+    }
+}
+
 // The chat as the UI sees it. The wire history the model sees is a separate,
 // richer structure (NikitaWireMessage) so tool_calls / tool results round-trip
 // correctly; a ChatMessage is only what a human reads.
@@ -9,17 +43,20 @@ public struct NikitaChatMessage: Identifiable, Equatable {
     public var role: Role
     public var text: String
     public var toolCalls: [NikitaToolInvocation]
+    public var attachments: [NikitaAttachment]
     public var date: Date
 
     public init(
         role: Role,
         text: String,
         toolCalls: [NikitaToolInvocation] = [],
+        attachments: [NikitaAttachment] = [],
         date: Date = .init()
     ) {
         self.role = role
         self.text = text
         self.toolCalls = toolCalls
+        self.attachments = attachments
         self.date = date
     }
 }

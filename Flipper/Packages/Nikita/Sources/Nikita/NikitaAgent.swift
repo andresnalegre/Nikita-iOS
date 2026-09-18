@@ -302,14 +302,54 @@ public final class NikitaAgent: ObservableObject {
         turnElapsed = 0
     }
 
-    public func send(_ text: String) {
+    public func send(_ text: String, attachments: [NikitaAttachment] = []) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, !thinking else { return }
+        // With attachments the text may be empty ("look at this") -- an image
+        // alone is a valid turn. Without any, empty text is a no-op.
+        guard (!trimmed.isEmpty || !attachments.isEmpty), !thinking else {
+            return
+        }
 
-        messages.append(.init(role: .user, text: trimmed))
-        wire.append(["role": "user", "content": trimmed])
+        messages.append(.init(
+            role: .user, text: trimmed, attachments: attachments))
+        wire.append(userWireMessage(text: trimmed, attachments: attachments))
 
         currentTask = Task { await runTurn(userText: trimmed) }
+    }
+
+    // Build the wire user message. With no attachments it is the plain string
+    // content the API has always taken. With attachments it becomes the
+    // OpenAI/Kimi multimodal array: a text part (the user's words plus any
+    // inlined text files) followed by an image_url part per image. K2.6+ read
+    // these natively -- no model switch needed.
+    private func userWireMessage(
+        text: String, attachments: [NikitaAttachment]
+    ) -> [String: Any] {
+        guard !attachments.isEmpty else {
+            return ["role": "user", "content": text]
+        }
+        var promptText = text
+        let textFiles = attachments.filter { $0.kind != .image }
+        for f in textFiles {
+            if !f.textContent.isEmpty {
+                promptText += "\n\n--- Attached file: \(f.filename) ---\n"
+                    + f.textContent
+            } else {
+                promptText += "\n\n[Attached file: \(f.filename), "
+                    + "\(f.byteCount) bytes -- binary, cannot read as text]"
+            }
+        }
+        var parts: [[String: Any]] = []
+        if !promptText.isEmpty {
+            parts.append(["type": "text", "text": promptText])
+        }
+        for img in attachments where img.kind == .image && !img.dataURL.isEmpty {
+            parts.append([
+                "type": "image_url",
+                "image_url": ["url": img.dataURL]
+            ])
+        }
+        return ["role": "user", "content": parts]
     }
 
     // MARK: Turn
@@ -614,7 +654,7 @@ public final class NikitaAgent: ObservableObject {
             while j < calls.count, Self.isParallelSafe(calls[j].name) { j += 1 }
 
             if j - i >= 2 {
-                turnStatus = "running \(j - i) lookups…"
+                turnStatus = "reading \(j - i) things…"
                 await withTaskGroup(of: (Int, (String, Bool)).self) { group in
                     for k in i..<j {
                         let call = calls[k]
@@ -635,7 +675,8 @@ public final class NikitaAgent: ObservableObject {
                 i = j
             } else {
                 let call = calls[i]
-                turnStatus = "running \(call.name)…"
+                turnStatus = Self.actionPhrase(
+                    name: call.name, argumentsJSON: call.argumentsJSON)
                 let r = await execute(
                     name: call.name, argumentsJSON: call.argumentsJSON)
                 results[i] = r
@@ -645,6 +686,52 @@ public final class NikitaAgent: ObservableObject {
             }
         }
         return results
+    }
+
+    // A Claude-Code-style live status line: an action verb plus the thing it is
+    // acting on ("read config.txt", "ran `ls -la`", "searched the web for X"),
+    // so the footer reads like a running command rather than a raw tool name.
+    static func actionPhrase(name: String, argumentsJSON: String) -> String {
+        let args = (try? JSONSerialization.jsonObject(
+            with: Data(argumentsJSON.utf8))) as? [String: Any] ?? [:]
+        func s(_ k: String) -> String {
+            let v = "\(args[k] ?? "")"
+            return v.count > 40 ? String(v.prefix(40)) + "…" : v
+        }
+        func base(_ p: String) -> String {
+            (p as NSString).lastPathComponent
+        }
+        switch name {
+        case "web_search": return "searching the web · \(s("query"))"
+        case "web_fetch": return "reading \(s("url"))"
+        case "spawn_task": return "spinning up a fragment · \(s("title"))"
+        case "update_plan": return "updating the plan"
+        case "remember": return "remembering that"
+        case "list_memory": return "checking memory"
+        case "forget": return "forgetting that"
+        case "run_cli": return "running on the Flipper · \(s("command"))"
+        case "computer_run": return "ran a command · \(s("command"))"
+        case "computer_read", "read_file":
+            return "read \(base(s("path")))"
+        case "computer_write", "save_file", "write_file":
+            return "writing \(base(s("path")))"
+        case "computer_edit": return "editing \(base(s("path")))"
+        case "computer_grep", "computer_find":
+            return "searching files · \(s("pattern"))\(s("query"))"
+        case "computer_list", "list_files":
+            return "listing \(s("path"))"
+        case "computer_mkdir", "make_dir": return "making \(base(s("path")))"
+        case "computer_delete", "delete_file":
+            return "deleting \(base(s("path")))"
+        case "transfer": return "copying files"
+        case "download": return "downloading \(s("url"))"
+        case "press_button": return "pressing \(s("button"))"
+        case "run_app": return "opening \(s("name"))"
+        default:
+            return name.hasPrefix("mcp__")
+                ? "using a tool · \(name)"
+                : "running \(name)…"
+        }
     }
 
     // MARK: Machine bridge

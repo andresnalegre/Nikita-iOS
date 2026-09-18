@@ -1,6 +1,8 @@
 import Nikita
+import PhotosUI
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 // Nikita's chat screen. A capable model over a plain HTTPS link -- no local
 // runtime, no streaming assembly -- so the view stays simple: a scroll of
@@ -23,6 +25,12 @@ struct NikitaView: View {
     @State private var planExpanded = false
     @State private var pulse = false
     @StateObject private var dictation = NikitaDictation()
+    // Files/images staged for the next message, shown as a strip above the
+    // input bar until sent. Images go to Kimi as vision parts; text files are
+    // inlined into the prompt.
+    @State private var pending: [NikitaAttachment] = []
+    @State private var photoItems: [PhotosPickerItem] = []
+    @State private var showFileImporter = false
     // Holds the app awake for the OS-allotted window (tens of seconds, and
     // a few minutes) so a turn already in flight keeps running when the user
     // switches to another app, instead of being frozen mid-thought. iOS does
@@ -40,6 +48,15 @@ struct NikitaView: View {
             fragmentsStrip
             messagesList
             footer
+            if dictation.listening {
+                NikitaWaveform(levels: dictation.levels)
+                    .frame(height: 40)
+                    .padding(.horizontal)
+                    .transition(.opacity)
+            }
+            if !pending.isEmpty {
+                pendingStrip
+            }
             inputBar
         }
         .task {
@@ -328,6 +345,31 @@ struct NikitaView: View {
 
     private var inputBar: some View {
         HStack(spacing: 8) {
+            // Attach an image or a file for Nikita to look at. Images become
+            // vision input; a photo comes from the library, a file from the
+            // document picker.
+            if !agent.thinking {
+                Menu {
+                    PhotosPicker(
+                        selection: $photoItems,
+                        maxSelectionCount: 4,
+                        matching: .images
+                    ) {
+                        Label("Photo", systemImage: "photo")
+                    }
+                    Button {
+                        showFileImporter = true
+                    } label: {
+                        Label("File", systemImage: "doc")
+                    }
+                } label: {
+                    Image(systemName: "plus.circle")
+                        .font(.system(size: 26))
+                        .foregroundColor(.accentColor)
+                }
+                .disabled(!hasKey)
+            }
+
             TextField("Message Nikita…", text: $draft, axis: .vertical)
                 .lineLimit(1...5)
                 .textFieldStyle(.plain)
@@ -378,10 +420,86 @@ struct NikitaView: View {
         .onChange(of: dictation.transcript) { text in
             if !text.isEmpty { draft = text }
         }
+        .onChange(of: photoItems) { items in
+            guard !items.isEmpty else { return }
+            Task { await loadPhotos(items) }
+        }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.item],
+            allowsMultipleSelection: true
+        ) { result in
+            if case .success(let urls) = result { loadFiles(urls) }
+        }
+    }
+
+    // MARK: attachments
+
+    private var pendingStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(pending) { att in
+                    NikitaAttachmentChip(attachment: att) {
+                        pending.removeAll { $0.id == att.id }
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
+        }
+    }
+
+    private func loadPhotos(_ items: [PhotosPickerItem]) async {
+        for item in items {
+            guard let data = try? await item.loadTransferable(
+                type: Data.self) else { continue }
+            let mime = "image/jpeg"
+            let b64 = data.base64EncodedString()
+            let att = NikitaAttachment(
+                kind: .image,
+                filename: "photo.jpg",
+                mime: mime,
+                dataURL: "data:\(mime);base64,\(b64)",
+                byteCount: data.count)
+            await MainActor.run { pending.append(att) }
+        }
+        await MainActor.run { photoItems = [] }
+    }
+
+    private func loadFiles(_ urls: [URL]) {
+        for url in urls {
+            let needsStop = url.startAccessingSecurityScopedResource()
+            defer { if needsStop { url.stopAccessingSecurityScopedResource() } }
+            guard let data = try? Data(contentsOf: url) else { continue }
+            let name = url.lastPathComponent
+            let ext = url.pathExtension.lowercased()
+            let imageExts = ["png", "jpg", "jpeg", "gif", "webp", "heic"]
+            if imageExts.contains(ext) {
+                let mime = ext == "png" ? "image/png"
+                    : (ext == "webp" ? "image/webp" : "image/jpeg")
+                let b64 = data.base64EncodedString()
+                pending.append(NikitaAttachment(
+                    kind: .image, filename: name, mime: mime,
+                    dataURL: "data:\(mime);base64,\(b64)",
+                    byteCount: data.count))
+            } else if let text = String(data: data, encoding: .utf8) {
+                pending.append(NikitaAttachment(
+                    kind: .text, filename: name, mime: "text/plain",
+                    textContent: String(text.prefix(100_000)),
+                    byteCount: data.count))
+            } else {
+                pending.append(NikitaAttachment(
+                    kind: .file, filename: name,
+                    mime: "application/octet-stream",
+                    byteCount: data.count))
+            }
+        }
     }
 
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && hasKey
+        let hasText = !draft.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty
+        return (hasText || !pending.isEmpty) && hasKey
     }
 
     private func beginBackgroundHold() {
@@ -403,8 +521,93 @@ struct NikitaView: View {
         // the recognizer releases the audio session before the turn starts.
         if dictation.listening { dictation.stop() }
         let text = draft
+        let attachments = pending
         draft = ""
-        agent.send(text)
+        pending = []
+        agent.send(text, attachments: attachments)
+    }
+}
+
+// MARK: waveform
+
+// The live voice waveform shown while dictating: a row of bars whose heights
+// follow recent microphone loudness, newest on the right, so the user sees the
+// mic is hearing them. Purely a level meter -- the words themselves stream into
+// the draft via the recognizer.
+private struct NikitaWaveform: View {
+    let levels: [CGFloat]
+
+    var body: some View {
+        GeometryReader { geo in
+            let count = max(levels.count, 1)
+            let spacing: CGFloat = 3
+            let barWidth = max(
+                2, (geo.size.width - spacing * CGFloat(count - 1))
+                    / CGFloat(count))
+            HStack(alignment: .center, spacing: spacing) {
+                ForEach(Array(levels.enumerated()), id: \.offset) { _, level in
+                    Capsule()
+                        .fill(Color.accentColor)
+                        .frame(
+                            width: barWidth,
+                            height: max(3, level * geo.size.height))
+                }
+            }
+            .frame(
+                width: geo.size.width, height: geo.size.height,
+                alignment: .trailing)
+            .animation(.linear(duration: 0.08), value: levels)
+        }
+    }
+}
+
+// MARK: attachment chip
+
+private struct NikitaAttachmentChip: View {
+    let attachment: NikitaAttachment
+    let onRemove: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if attachment.kind == .image,
+                   let img = decodedImage {
+                    Image(uiImage: img)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 56, height: 56)
+                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                } else {
+                    VStack(spacing: 2) {
+                        Image(systemName: "doc.fill")
+                            .font(.system(size: 20))
+                        Text(attachment.filename)
+                            .font(.system(size: 8))
+                            .lineLimit(1)
+                    }
+                    .frame(width: 56, height: 56)
+                    .background(Color.gray.opacity(0.15))
+                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundColor(.white)
+                    .background(Circle().fill(Color.black.opacity(0.5)))
+            }
+            .offset(x: 5, y: -5)
+        }
+    }
+
+    private var decodedImage: UIImage? {
+        guard let comma = attachment.dataURL.firstIndex(of: ",") else {
+            return nil
+        }
+        let b64 = String(attachment.dataURL[
+            attachment.dataURL.index(after: comma)...])
+        guard let data = Data(base64Encoded: b64) else { return nil }
+        return UIImage(data: data)
     }
 }
 
@@ -418,10 +621,21 @@ private struct NikitaMessageRow: View {
         case .user:
             HStack {
                 Spacer(minLength: 40)
-                Text(message.text)
-                    .padding(10)
-                    .background(Color.accentColor.opacity(0.15))
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                VStack(alignment: .trailing, spacing: 6) {
+                    if !message.attachments.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(message.attachments) { att in
+                                NikitaBubbleAttachment(attachment: att)
+                            }
+                        }
+                    }
+                    if !message.text.isEmpty {
+                        Text(message.text)
+                            .padding(10)
+                            .background(Color.accentColor.opacity(0.15))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                    }
+                }
             }
         case .error:
             Label(message.text, systemImage: "exclamationmark.triangle.fill")
@@ -442,6 +656,41 @@ private struct NikitaMessageRow: View {
                 }
             }
         }
+    }
+}
+
+// A sent attachment shown inside the user's chat bubble: image as a thumbnail,
+// anything else as a small file card.
+private struct NikitaBubbleAttachment: View {
+    let attachment: NikitaAttachment
+
+    var body: some View {
+        if attachment.kind == .image, let img = decodedImage {
+            Image(uiImage: img)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 120, height: 120)
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+        } else {
+            HStack(spacing: 6) {
+                Image(systemName: "doc.fill")
+                Text(attachment.filename).lineLimit(1)
+            }
+            .font(.caption)
+            .padding(8)
+            .background(Color.gray.opacity(0.15))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private var decodedImage: UIImage? {
+        guard let comma = attachment.dataURL.firstIndex(of: ",") else {
+            return nil
+        }
+        let b64 = String(attachment.dataURL[
+            attachment.dataURL.index(after: comma)...])
+        guard let data = Data(base64Encoded: b64) else { return nil }
+        return UIImage(data: data)
     }
 }
 
