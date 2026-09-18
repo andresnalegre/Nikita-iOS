@@ -161,6 +161,25 @@ enum NikitaTools {
         ]
     }
 
+    // The call_plugin tool -- offered only when the user has registered a
+    // plugin (an external HTTP API). Base URL and auth are added by the client.
+    static var callPluginTool: [String: Any] {
+        function(
+            "call_plugin",
+            "Call one of the user's registered API PLUGINS (see the PLUGINS "
+            + "list in your context). The plugin's base URL and any auth header "
+            + "are added automatically -- you give the plugin name, the path "
+            + "(appended to the base URL), the HTTP method, and an optional "
+            + "JSON body. Returns the response. Only for registered plugins.",
+            properties: [
+                "name": str("The registered plugin name."),
+                "path": str("Path appended to the base URL, e.g. /v1/x?a=1"),
+                "method": str("GET, POST, PUT or DELETE. Default GET."),
+                "body": str("Optional JSON body for POST/PUT.")
+            ],
+            required: ["name", "path"])
+    }
+
     // MARK: Device (offered on action turns)
 
     static var deviceTools: [[String: Any]] {

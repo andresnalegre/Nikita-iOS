@@ -31,6 +31,10 @@ struct NikitaView: View {
     @State private var pending: [NikitaAttachment] = []
     @State private var photoItems: [PhotosPickerItem] = []
     @State private var showFileImporter = false
+    // The "+" menu sub-sheets.
+    @State private var showQuick = false
+    @State private var showSkill = false
+    @State private var showPlugins = false
     // Holds the app awake for the OS-allotted window (tens of seconds, and
     // a few minutes) so a turn already in flight keeps running when the user
     // switches to another app, instead of being frozen mid-thought. iOS does
@@ -91,6 +95,19 @@ struct NikitaView: View {
             hasKey = NikitaSettings.shared.hasApiKey
         }) {
             NavigationView { NikitaSettingsView() }
+        }
+        .sheet(isPresented: $showQuick) {
+            NikitaQuickCommandsSheet { prompt in
+                showQuick = false
+                if dictation.listening { dictation.stop() }
+                agent.send(prompt)
+            }
+        }
+        .sheet(isPresented: $showSkill) {
+            NikitaAddSkillSheet()
+        }
+        .sheet(isPresented: $showPlugins) {
+            NikitaPluginsSheet()
         }
         .onChange(of: agent.thinking) { thinking in
             if thinking { beginBackgroundHold() } else { endBackgroundHold() }
@@ -355,12 +372,28 @@ struct NikitaView: View {
                         maxSelectionCount: 4,
                         matching: .images
                     ) {
-                        Label("Photo", systemImage: "photo")
+                        Label("Add files or photos", systemImage: "photo")
                     }
                     Button {
                         showFileImporter = true
                     } label: {
-                        Label("File", systemImage: "doc")
+                        Label("Add file", systemImage: "doc")
+                    }
+                    Divider()
+                    Button {
+                        showQuick = true
+                    } label: {
+                        Label("Quick commands", systemImage: "bolt")
+                    }
+                    Button {
+                        showSkill = true
+                    } label: {
+                        Label("Add New Skill", systemImage: "sparkles")
+                    }
+                    Button {
+                        showPlugins = true
+                    } label: {
+                        Label("Plugins", systemImage: "powerplug")
                     }
                 } label: {
                     Image(systemName: "plus.circle")

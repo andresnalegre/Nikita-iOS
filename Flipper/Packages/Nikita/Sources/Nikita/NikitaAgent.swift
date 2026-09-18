@@ -417,6 +417,8 @@ public final class NikitaAgent: ObservableObject {
                 hasBridge: hasBridge,
                 memory: memory.all(),
                 lastSavedPath: lastSavedPath)
+                // Learned skills + registered plugins from the "+" menu.
+                + NikitaExtras.shared.promptSection()
                 // Last, after everything else, so the bytes before it never
                 // move and the cached prefix keeps hitting. The plan is the one
                 // part of this prompt that legitimately changes every round.
@@ -432,6 +434,10 @@ public final class NikitaAgent: ObservableObject {
             // from the servers at runtime, so they are not in the static
             // family table and are gated by the MCP switch instead.
             tools += mcp.toolSchemas()
+            // The call_plugin tool, only when the user has registered a plugin.
+            if !NikitaExtras.shared.plugins.isEmpty {
+                tools.append(NikitaTools.callPluginTool)
+            }
 
             let reply: KimiClient.Reply
             do {
@@ -736,6 +742,38 @@ public final class NikitaAgent: ObservableObject {
 
     // MARK: Machine bridge
 
+    // Call a registered plugin (external HTTP API). Base URL + auth header come
+    // from the stored plugin; the model only supplies path/method/body.
+    private func callPlugin(_ args: [String: Any]) async throws -> String {
+        let name = (args["name"] as? String) ?? ""
+        guard let p = NikitaExtras.shared.plugin(named: name) else {
+            return jsonOK(["error": "no plugin named '\(name)'"])
+        }
+        var base = p.baseUrl
+        while base.hasSuffix("/") { base = String(base.dropLast()) }
+        var path = (args["path"] as? String) ?? ""
+        if !path.isEmpty, !path.hasPrefix("/") { path = "/" + path }
+        guard let url = URL(string: base + path) else {
+            return jsonOK(["error": "bad url"])
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = ((args["method"] as? String) ?? "GET").uppercased()
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !p.authHeader.isEmpty {
+            req.setValue(p.authValue, forHTTPHeaderField: p.authHeader)
+        }
+        if let body = args["body"] as? String, !body.isEmpty,
+           req.httpMethod != "GET" {
+            req.httpBody = body.data(using: .utf8)
+        }
+        req.timeoutInterval = 30
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let text = String(
+            data: data.prefix(8000), encoding: .utf8) ?? "(binary)"
+        return jsonOK(["status": status, "body": text])
+    }
+
     private func machineRun(_ command: String) async throws -> String {
         guard let machine, await machine.isBridgeConnected else {
             throw NikitaDeviceError.failed(
@@ -862,6 +900,9 @@ public final class NikitaAgent: ObservableObject {
                     title: (args["title"] as? String) ?? "",
                     task: (args["task"] as? String) ?? "")
                 return (note, true)
+
+            case "call_plugin":
+                return (try await callPlugin(args), true)
 
             case "web_search":
                 let query = (args["query"] as? String) ?? ""
