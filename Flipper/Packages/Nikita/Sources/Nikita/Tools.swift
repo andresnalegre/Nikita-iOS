@@ -138,7 +138,26 @@ enum NikitaTools {
                     "url": str("The full URL to fetch, e.g. "
                         + "https://example.com/page")
                 ],
-                required: ["url"])
+                required: ["url"]),
+            function(
+                "spawn_task",
+                "Split off a FRAGMENT of yourself to work a sub-task in "
+                + "PARALLEL, while you keep going here. The fragment is still "
+                + "you -- same identity, same memory -- running on its own with "
+                + "the web and the bridged computer's shell. Use it to fan out "
+                + "independent work (research several things at once, build "
+                + "several files, chase several leads) so more than one thing "
+                + "happens at the same time. It runs in the background and its "
+                + "result arrives on its own -- do NOT wait for it here. Give "
+                + "each fragment a SELF-CONTAINED task with all the context it "
+                + "needs; it cannot see this conversation.",
+                properties: [
+                    "title": str("Short label for the task, e.g. 'research X'."),
+                    "task": str("The full, self-contained instruction for the "
+                        + "fragment -- all context it needs, since it cannot "
+                        + "see this chat.")
+                ],
+                required: ["task"])
         ]
     }
 
@@ -399,6 +418,7 @@ enum NikitaTools {
         // did not ask for the agent to stop being able to keep track.
         case "update_plan": return "plan"
         case "web_search", "web_fetch": return "web"
+        case "spawn_task": return "web"
         case "remember", "list_memory", "forget": return "memory"
         case "press_button": return "buttons"
         case "run_app": return "apps"

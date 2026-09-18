@@ -37,6 +37,7 @@ struct NikitaView: View {
                 NikitaSetupBanner { showSettings = true }
             }
             planStrip
+            fragmentsStrip
             messagesList
             footer
             inputBar
@@ -154,6 +155,74 @@ struct NikitaView: View {
         }
     }
 
+    // The parallel Nikita fragments spun off with spawn_task. Each is the same
+    // Nikita working a sub-task in the background; a running one pulses (green
+    // dot), a finished one shows done/failed. This is the visible half of "N
+    // agentes completos" on the phone, matching qFlipper's fragments strip.
+    @ViewBuilder
+    private var fragmentsStrip: some View {
+        if !agent.fragments.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text("✦ FRAGMENTS")
+                        .font(.system(
+                            size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                    Text(agent.runningFragmentCount > 0
+                         ? "\(agent.runningFragmentCount) running" : "all done")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(
+                            agent.runningFragmentCount > 0 ? .accentColor : .green)
+                    Spacer()
+                    if agent.runningFragmentCount == 0 {
+                        Button("Clear") { agent.clearFinishedFragments() }
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                }
+                ForEach(agent.fragments) { frag in
+                    HStack(alignment: .top, spacing: 6) {
+                        Circle()
+                            .fill(fragColour(frag.state))
+                            .frame(width: 7, height: 7)
+                            .padding(.top, 3)
+                        VStack(alignment: .leading, spacing: 0) {
+                            Text(frag.title)
+                                .font(.system(
+                                    size: 10, weight: .semibold,
+                                    design: .monospaced))
+                                .lineLimit(1)
+                            if !frag.status.isEmpty {
+                                Text(frag.status)
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        Spacer()
+                        if frag.state == .running {
+                            Button("stop") { agent.stopFragment(id: frag.id) }
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.accentColor.opacity(0.08))
+        }
+    }
+
+    private func fragColour(_ state: NikitaFragment.State) -> Color {
+        switch state {
+        case .running: return .accentColor
+        case .done: return .green
+        case .failed, .stopped: return .red
+        }
+    }
+
     private var currentPlanItem: String? {
         if let doing = agent.planItems.first(where: {
             $0.status == .inProgress
@@ -229,6 +298,10 @@ struct NikitaView: View {
                         ? "thinking" : agent.turnStatus
                     Text("· \(phase)")
                         .lineLimit(1)
+                    if agent.runningFragmentCount > 0 {
+                        Text("· +\(agent.runningFragmentCount) frag")
+                            .foregroundColor(.accentColor)
+                    }
                     Spacer()
                 } else {
                     Spacer()

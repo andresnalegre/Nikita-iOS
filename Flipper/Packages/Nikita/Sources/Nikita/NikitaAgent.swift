@@ -52,6 +52,17 @@ public final class NikitaAgent: ObservableObject {
     @Published public private(set) var planItems: [NikitaPlanItem] = []
     @Published public private(set) var planNote = ""
 
+    // ---- parallel agents (Nikita fragments) --------------------------------
+    // Fragments spun off with spawn_task, each working a sub-task in the
+    // background. The UI shows them as a strip; runningFragmentCount is what a
+    // "running task +N" badge reads. Kept until cleared so a finished result
+    // stays visible.
+    @Published public private(set) var fragments: [NikitaFragment] = []
+    private var nextFragmentId = 1
+    public var runningFragmentCount: Int {
+        fragments.filter { $0.state == .running }.count
+    }
+
     private let bridge: NikitaDeviceBridge
     // Optional: no bridge means no shell and no computer tools, which is the
     // normal state until one is running and connected.
@@ -167,6 +178,55 @@ public final class NikitaAgent: ObservableObject {
         try? await bridge.makeDir(at: "/ext/nikita/buddy")
         try? await bridge.writeFile(
             at: "/ext/nikita/buddy/res.json", content: json)
+    }
+
+    // MARK: parallel agents (Nikita fragments)
+
+    // Spin off a fragment of Nikita to work `task` in the background. Returns a
+    // short note the tool call hands back to the model, so it knows the work is
+    // running and does not sit waiting for it.
+    @discardableResult
+    public func spawnFragment(title: String, task: String) -> String {
+        let trimmed = task.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "{\"error\":\"no task given\"}"
+        }
+        let key = settings.revealApiKey()
+        guard !key.isEmpty else {
+            return "{\"error\":\"no API key for the fragment\"}"
+        }
+        let label = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let frag = NikitaFragment(
+            id: nextFragmentId,
+            title: label.isEmpty ? String(trimmed.prefix(40)) : label,
+            task: trimmed,
+            apiKey: key,
+            model: settings.model,
+            braveKey: settings.braveKey,
+            memory: memory.all(),
+            machine: machine)
+        nextFragmentId += 1
+        // Republish on every change so the strip tracks status/state live.
+        frag.setOnChange { [weak self] in
+            self?.objectWillChange.send()
+        }
+        fragments.append(frag)
+        frag.start()
+        objectWillChange.send()
+        return "{\"ok\":true,\"spawned\":true,\"note\":\"A fragment is now "
+            + "working this in parallel. Its result arrives on its own -- do "
+            + "not wait for it here; continue with anything else, or tell the "
+            + "user it is running.\"}"
+    }
+
+    public func stopFragment(id: Int) {
+        fragments.first { $0.id == id }?.stop()
+        objectWillChange.send()
+    }
+
+    public func clearFinishedFragments() {
+        fragments.removeAll { $0.state != .running }
+        objectWillChange.send()
     }
 
     private func startTicker() {
@@ -709,6 +769,12 @@ public final class NikitaAgent: ObservableObject {
                 publishPlan()
                 await pushPlanToCard()   // mirror so qFlipper sees it too
                 return (result, true)
+
+            case "spawn_task":
+                let note = spawnFragment(
+                    title: (args["title"] as? String) ?? "",
+                    task: (args["task"] as? String) ?? "")
+                return (note, true)
 
             case "web_search":
                 let query = (args["query"] as? String) ?? ""
