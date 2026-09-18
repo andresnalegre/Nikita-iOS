@@ -12,6 +12,18 @@ public protocol NikitaDeviceBridge: Sendable {
     /// True when a Flipper is connected and its RPC session is live.
     var isConnected: Bool { get async }
 
+    /// The connected Flipper's own hardware id (`hardware.uid` from device
+    /// info), or its name when that has not been read yet; nil when nothing is
+    /// connected.
+    ///
+    /// Never sent anywhere as-is: NikitaMcp normalises and hashes it. The point
+    /// of using the HARDWARE id rather than the BLE peripheral's UUID is that
+    /// CoreBluetooth's UUID is per-installation -- it identifies this phone's
+    /// view of the device, not the device -- so it would not match what the
+    /// desktop sees for the same Flipper, and the whole point is that one
+    /// Flipper is one identity across the ecosystem.
+    var deviceIdentity: String? { get async }
+
     func listFiles(at path: String) async throws -> [NikitaFileEntry]
     func readFile(at path: String) async throws -> String
     func writeFile(at path: String, content: String) async throws

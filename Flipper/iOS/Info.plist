@@ -110,8 +110,12 @@
 	<string>This will allow Flipper app to connect to your Flipper Device</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
 	<string>This will allow Flipper app to connect to your Flipper Device</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Speak to Nikita instead of typing.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Save Flipper screen screenshots to your photo library.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Turn what you say to Nikita into text.</string>
 	<key>NSSiriUsageDescription</key>
 	<string>To control Flipper</string>
 	<key>NSSupportsLiveActivities</key>

@@ -16,6 +16,8 @@ public final class NikitaSettings {
         static let model = "nikita.model"
         static let enabled = "nikita.enabled"
         static let filterPrefix = "nikita.filter."
+        static let mcpEnabled = "nikita.mcp.enabled"
+        static let mcpServers = "nikita.mcp.servers"
     }
 
     private init() {}
@@ -73,6 +75,8 @@ public final class NikitaSettings {
               blurb: "Press the Flipper's buttons."),
         .init(id: "apps", label: "Flipper: apps",
               blurb: "Open and close apps on the Flipper."),
+        .init(id: "web", label: "Web search",
+              blurb: "Search the web and read pages."),
         .init(id: "serial", label: "Flipper: serial CLI",
               blurb: "Run the Flipper's own text commands through a bridge on "
               + "your computer. Reaches sub-GHz, NFC, GPIO and infrared.",
@@ -112,29 +116,107 @@ public final class NikitaSettings {
         for f in Self.filterableTools { setAllowed(f, on) }
     }
 
+    // MARK: MCP servers
+    //
+    // The list itself is ordinary configuration and lives in UserDefaults. The
+    // per-server token does not: it is a credential, so it goes in the Keychain
+    // beside the API key, and nothing hands it back to the UI except a
+    // deliberate reveal.
+
+    public var mcpEnabled: Bool {
+        get {
+            // On by default. A configured server the user has to remember to
+            // switch on is a server that silently does nothing.
+            if defaults.object(forKey: Keys.mcpEnabled) == nil { return true }
+            return defaults.bool(forKey: Keys.mcpEnabled)
+        }
+        set { defaults.set(newValue, forKey: Keys.mcpEnabled) }
+    }
+
+    public var mcpServers: [NikitaMcp.Server] {
+        get {
+            guard let data = defaults.data(forKey: Keys.mcpServers),
+                  let list = try? JSONDecoder().decode(
+                    [NikitaMcp.Server].self, from: data)
+            else { return [] }
+            return list
+        }
+        set {
+            guard let data = try? JSONEncoder().encode(newValue) else { return }
+            defaults.set(data, forKey: Keys.mcpServers)
+        }
+    }
+
+    public func addOrUpdateMcpServer(
+        _ server: NikitaMcp.Server, token: String?
+    ) {
+        var list = mcpServers
+        if let i = list.firstIndex(where: { $0.name == server.name }) {
+            list[i] = server
+        } else {
+            list.append(server)
+        }
+        mcpServers = list
+        if let token { setMcpToken(token, for: server.name) }
+    }
+
+    public func removeMcpServer(named name: String) {
+        mcpServers = mcpServers.filter { $0.name != name }
+        setMcpToken("", for: name)
+    }
+
+    public func mcpToken(for server: String) -> String {
+        readKeychain(account: mcpAccount(server))
+    }
+
+    public func setMcpToken(_ token: String, for server: String) {
+        let account = mcpAccount(server)
+        deleteKeychain(account: account)
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        writeKeychain(trimmed, account: account)
+    }
+
+    private func mcpAccount(_ server: String) -> String {
+        "one.flipper.nikita.mcp.\(server)"
+    }
+
     // MARK: API key (Keychain)
 
     public var hasApiKey: Bool { !revealApiKey().isEmpty }
 
     public func setApiKey(_ key: String) {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        deleteKey()
-        guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return }
+        deleteKeychain(account: keychainAccount)
+        guard !trimmed.isEmpty else { return }
+        writeKeychain(trimmed, account: keychainAccount)
+    }
+
+    public func revealApiKey() -> String {
+        readKeychain(account: keychainAccount)
+    }
+
+    public func clearApiKey() { deleteKeychain(account: keychainAccount) }
+
+    // One set of Keychain calls, used by the API key and by every MCP token.
+
+    private func writeKeychain(_ value: String, account: String) {
+        guard let data = value.data(using: .utf8) else { return }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
+            kSecAttrAccount as String: account,
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
         SecItemAdd(query as CFDictionary, nil)
     }
 
-    public func revealApiKey() -> String {
+    private func readKeychain(account: String) -> String {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -142,18 +224,16 @@ public final class NikitaSettings {
         guard
             SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
             let data = item as? Data,
-            let key = String(data: data, encoding: .utf8)
+            let value = String(data: data, encoding: .utf8)
         else { return "" }
-        return key
+        return value
     }
 
-    public func clearApiKey() { deleteKey() }
-
-    private func deleteKey() {
+    private func deleteKeychain(account: String) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
-            kSecAttrAccount as String: keychainAccount
+            kSecAttrAccount as String: account
         ]
         SecItemDelete(query as CFDictionary)
     }
@@ -162,6 +242,9 @@ public final class NikitaSettings {
 
     public func wipe() {
         clearApiKey()
+        for server in mcpServers { setMcpToken("", for: server.name) }
+        defaults.removeObject(forKey: Keys.mcpServers)
+        defaults.removeObject(forKey: Keys.mcpEnabled)
         enabled = false
         setAllFilters(false)
         defaults.removeObject(forKey: Keys.model)

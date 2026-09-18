@@ -7,12 +7,50 @@ import Combine
 // hosted model (Kimi) means none of the desktop's small-model scaffolding --
 // forced-single-tool retries, primer turns, aggressive context trimming -- is
 // needed here; the loop stays simple and honest.
+//
+// Three things make this a loop an agent can live in rather than a request/
+// response pair:
+//
+//   The plan. The model keeps its own list of steps, it is stored on disk, and
+//   this loop reads it to decide whether the turn is actually over. A turn that
+//   has run its tools but still has open items gets handed back to the model to
+//   keep going, and a plan that outlives the process means closing the app
+//   pauses the work instead of ending it.
+//
+//   A tool surface that does not move. Every turn is offered the same tools and
+//   the same prompt prefix, with only the plan block changing at the end. What
+//   Nikita can do never depends on how the sentence was phrased, and the
+//   provider's prefix cache hits on nearly every round -- which is most of why
+//   a reply lands in seconds instead of half a minute.
+//
+//   Independent reads run together. Three lookups the model asked for in one
+//   breath are three lookups, not three waits.
 @MainActor
 public final class NikitaAgent: ObservableObject {
     @Published public private(set) var messages: [NikitaChatMessage] = []
     @Published public private(set) var thinking = false
     @Published public private(set) var usage = NikitaUsage()
     @Published public private(set) var turnStatus = ""
+    // The live footer, mirroring qFlipper: seconds ticking, tokens so far this
+    // turn, and the running cost. turnElapsed is driven by a 1s ticker while a
+    // turn is in flight; turnTokens accumulates across the turn's rounds.
+    @Published public private(set) var turnElapsed = 0
+    @Published public private(set) var turnTokens = 0
+    private var turnStartedAt: Date?
+    private var ticker: Task<Void, Never>?
+
+    // ---- Nikita Buddy relay ------------------------------------------------
+    // The Flipper leaves a question in /ext/nikita/buddy/req.json; this phone's
+    // Kimi link is what lets it be answered. A poll picks up a new request, runs
+    // it as a normal turn (so it shows in the chat), and the reply is written
+    // back to res.json for the Flipper to display.
+    private var buddyReqId: UInt32?
+    private var buddyLastHandled: UInt32 = 0
+    private var buddyPoll: Task<Void, Never>?
+
+    // The plan the model maintains, and what the UI shows of it.
+    @Published public private(set) var planItems: [NikitaPlanItem] = []
+    @Published public private(set) var planNote = ""
 
     private let bridge: NikitaDeviceBridge
     // Optional: no bridge means no shell and no computer tools, which is the
@@ -20,24 +58,170 @@ public final class NikitaAgent: ObservableObject {
     private let machine: NikitaMachineBridge?
     private let memory: NikitaMemory
     private let settings: NikitaSettings
+    private let plan: NikitaPlan
+    // Whether THIS agent owns the Flipper->Nikita relay poll. Only one agent
+    // should (the app-level one), or a request would be answered twice. The
+    // chat view's agent leaves this off; the app-level NikitaBuddyService turns
+    // it on so the relay works no matter which screen is open -- matching
+    // qFlipper, whose watcher lives in the always-on backend.
+    private let relayEnabled: Bool
+    // MCP tool servers. Public so the settings screen can show their state and
+    // ask for a reconnect.
+    public let mcp: NikitaMcp
 
     // OpenAI-shaped wire history (no system message; it is rebuilt each turn).
     private var wire: [[String: Any]] = []
     private var lastSavedPath: String?
     private var currentTask: Task<Void, Never>?
 
-    private let maxToolRounds = 8
+    // Rounds inside ONE turn. Eight was a cliff: a genuinely multi-step job hit
+    // it, got a canned "I stopped" line, and the work was abandoned half done.
+    // This is a high ceiling rather than a budget -- it exists to stop a
+    // runaway, not to decide when the job is finished. The plan decides that.
+    private let maxToolRounds = 40
+
+    // How many times one turn may be handed back to the model purely because
+    // its own plan still has open items. Bounded so a step the model never
+    // ticks off cannot spin forever; hitting the bound is not a failure, since
+    // the plan is kept and the next message resumes from it.
+    private let maxPlanContinuations = 12
 
     public init(
         bridge: NikitaDeviceBridge,
         machine: NikitaMachineBridge? = nil,
         memory: NikitaMemory = .init(),
-        settings: NikitaSettings = .shared
+        settings: NikitaSettings = .shared,
+        plan: NikitaPlan = .init(),
+        relayEnabled: Bool = false
     ) {
         self.bridge = bridge
         self.machine = machine
         self.memory = memory
         self.settings = settings
+        self.plan = plan
+        self.relayEnabled = relayEnabled
+        self.mcp = NikitaMcp(settings: settings)
+        // Whatever was left open last time. Published before anything else can
+        // look at it: an open item here is the difference between an assistant
+        // that greets you and one that says what it was in the middle of.
+        publishPlan()
+    }
+
+    // Bring the MCP servers up. Called when the assistant screen appears, so
+    // the tools are known before the first message rather than discovered
+    // halfway through one.
+    public func connectMcp() async {
+        // Which Flipper the servers are being asked on behalf of, before the
+        // first call rather than after.
+        mcp.setDeviceIdentity(await bridge.deviceIdentity)
+        await mcp.reload()
+        if relayEnabled { startBuddyPoll() }
+    }
+
+    private func startBuddyPoll() {
+        guard buddyPoll == nil else { return }
+        buddyPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                await self?.pollBuddyMailbox()
+            }
+        }
+    }
+
+    // Read the Flipper's question, and if it is new and we are idle, answer it
+    // through the normal turn. Quiet and best-effort: no Flipper, nothing to do.
+    private func pollBuddyMailbox() async {
+        guard !thinking, buddyReqId == nil else { return }
+        guard await bridge.isConnected else { return }
+        guard let json = try? await bridge.readFile(
+            at: "/ext/nikita/buddy/req.json"), !json.isEmpty,
+            let data = json.data(using: .utf8),
+            let obj = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any]
+        else { return }
+        let id = UInt32((obj["id"] as? Double) ?? 0)
+        let text = ((obj["text"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard id != 0, id != buddyLastHandled, !text.isEmpty,
+              !thinking, buddyReqId == nil else { return }
+        buddyReqId = id
+        buddyLastHandled = id
+        // The Buddy is English-only and shows on a tiny screen, so the relayed
+        // turn is told to keep the answer short and in English.
+        let relayed = text
+            + " (Reply in English only, in a few short lines suitable for a "
+            + "tiny screen.)"
+        messages.append(.init(role: .user, text: text))
+        wire.append(["role": "user", "content": relayed])
+        currentTask = Task { await runTurn(userText: relayed) }
+    }
+
+    private func writeBuddyReply(_ id: UInt32, _ text: String) async {
+        let obj: [String: Any] = [
+            "id": Double(id),
+            "text": text.isEmpty ? "Done." : text,
+            "done": true
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let json = String(data: data, encoding: .utf8) else { return }
+        try? await bridge.makeDir(at: "/ext/nikita/buddy")
+        try? await bridge.writeFile(
+            at: "/ext/nikita/buddy/res.json", content: json)
+    }
+
+    private func startTicker() {
+        ticker?.cancel()
+        ticker = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                guard let self, let started = self.turnStartedAt else { return }
+                self.turnElapsed = Int(Date().timeIntervalSince(started))
+            }
+        }
+    }
+
+    private func stopTicker() {
+        ticker?.cancel()
+        ticker = nil
+        turnStartedAt = nil
+    }
+
+    // "8s", "1m 20s" -- the same compact shape qFlipper shows.
+    public var turnElapsedText: String {
+        let s = turnElapsed
+        return s < 60 ? "\(s)s" : "\(s / 60)m \(s % 60)s"
+    }
+
+    private func publishPlan() {
+        planItems = plan.items
+        planNote = plan.note
+    }
+
+    // The plan lives on the SD card at /ext/nikita/plan.json too, so a job
+    // started in qFlipper shows up here and vice versa -- the same card the
+    // three clients already share. The local file is the cache; the card is the
+    // shared copy. Both are best-effort and silent: no Flipper, no sync, and
+    // the local plan still works.
+    private func pullPlanFromCard() async {
+        guard await bridge.isConnected else { return }
+        guard let text = try? await bridge.readFile(
+            at: "/ext/nikita/plan.json"), !text.isEmpty else { return }
+        if plan.adoptFromJSON(text) { publishPlan() }
+    }
+
+    private func pushPlanToCard() async {
+        guard await bridge.isConnected else { return }
+        try? await bridge.makeDir(at: "/ext/nikita")
+        try? await bridge.writeFile(
+            at: "/ext/nikita/plan.json", content: plan.exportJSON())
+    }
+
+    public var planOpenCount: Int { plan.openCount }
+
+    public func clearPlan() {
+        plan.clear()
+        publishPlan()
+        Task { await pushPlanToCard() }
     }
 
     public var isBusy: Bool { thinking }
@@ -52,8 +236,10 @@ public final class NikitaAgent: ObservableObject {
     public func stop() {
         currentTask?.cancel()
         currentTask = nil
+        stopTicker()
         thinking = false
         turnStatus = ""
+        turnElapsed = 0
     }
 
     public func send(_ text: String) {
@@ -71,9 +257,22 @@ public final class NikitaAgent: ObservableObject {
     private func runTurn(userText: String) async {
         thinking = true
         turnStatus = "thinking…"
+        turnStartedAt = Date()
+        turnElapsed = 0
+        turnTokens = 0
+        usage.turnCostUSD = 0
+        startTicker()
         defer {
+            stopTicker()
             thinking = false
             turnStatus = ""
+            // If this turn answered a Flipper request, hand the reply back to
+            // the card. The last assistant message is the model's own words.
+            if let id = buddyReqId {
+                buddyReqId = nil
+                let reply = messages.last { $0.role == .assistant }?.text ?? ""
+                Task { await writeBuddyReply(id, reply) }
+            }
         }
 
         let key = settings.revealApiKey()
@@ -84,12 +283,29 @@ public final class NikitaAgent: ObservableObject {
 
         let client = KimiClient(apiKey: key, model: settings.model)
         let connected = await bridge.isConnected
-        let needsTools = classifyNeedsTools(userText)
+        // Re-read every turn: a Flipper can be disconnected and another
+        // connected while the app stays open, and a server keeping per-device
+        // state must see that rather than a stale identity.
+        mcp.setDeviceIdentity(await bridge.deviceIdentity)
+        // Adopt a newer plan the card may hold (e.g. one qFlipper just wrote)
+        // before this turn reads the plan into its prompt.
+        await pullPlanFromCard()
+        // Always on. classifyNeedsTools is still called -- see its own comment
+        // -- but only to label the turn: an assistant whose abilities come and
+        // go by keyword cannot be relied on, and a prompt that changes shape
+        // every turn is a prompt the provider never caches.
+        _ = classifyNeedsTools(userText)
+        let needsTools = true
 
         var turnPromptTokens = 0
         var turnCompletionTokens = 0
+        var planContinuations = 0
+        var ranAnyTool = false
+        var incapacityNudged = false
 
-        for round in 0..<maxToolRounds {
+        var round = 0
+        while round < maxToolRounds {
+            round += 1
             if Task.isCancelled { return }
 
             let hasBridge = await (machine?.isBridgeConnected ?? false)
@@ -100,13 +316,21 @@ public final class NikitaAgent: ObservableObject {
                 hasBridge: hasBridge,
                 memory: memory.all(),
                 lastSavedPath: lastSavedPath)
+                // Last, after everything else, so the bytes before it never
+                // move and the cached prefix keeps hitting. The plan is the one
+                // part of this prompt that legitimately changes every round.
+                + plan.promptBlock()
 
             var msgs: [[String: Any]] = [["role": "system", "content": system]]
             msgs += trimmedWire()
-            let tools = NikitaTools.offered(
+            var tools = NikitaTools.offered(
                 needsDevice: needsTools,
                 hasBridge: hasBridge,
                 isAllowed: { self.settings.isAllowed($0) })
+            // MCP tools, appended after the access filter: their names come
+            // from the servers at runtime, so they are not in the static
+            // family table and are gated by the MCP switch instead.
+            tools += mcp.toolSchemas()
 
             let reply: KimiClient.Reply
             do {
@@ -119,14 +343,69 @@ public final class NikitaAgent: ObservableObject {
 
             turnPromptTokens += reply.promptTokens
             turnCompletionTokens += reply.completionTokens
+            // Published so the footer shows the count climbing round by round,
+            // the way qFlipper's does, instead of only at the very end.
+            turnTokens = turnPromptTokens + turnCompletionTokens
             accrueCost(
                 prompt: reply.promptTokens,
                 completion: reply.completionTokens,
                 model: settings.model)
 
-            // Terminal turn: the model answered in words, no tool calls.
+            // The model answered in words. Whether that ends the turn is not
+            // its call alone: if its own plan still has open items and it has
+            // actually been working, the job is not over, and stopping here is
+            // the assistant dying with the work half done. So it gets the turn
+            // back, with the next item named.
             if reply.toolCalls.isEmpty {
                 let answer = reply.content.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                if plan.openCount > 0, ranAnyTool,
+                   planContinuations < maxPlanContinuations {
+                    planContinuations += 1
+                    // Anything it did say is kept on screen -- it is usually
+                    // "next I'll do X", which is worth reading while X happens.
+                    if !answer.isEmpty { appendAssistant(answer) }
+                    wire.append(["role": "assistant", "content": answer])
+                    wire.append([
+                        "role": "user",
+                        "content": "[the app] Your plan still has "
+                            + "\(plan.openCount) open item(s); the next one "
+                            + "is \"\(plan.current)\". Keep going now — call "
+                            + "the tool for it. Mark items done with "
+                            + "update_plan as they land. Only answer in words "
+                            + "when the plan is clear, or when you genuinely "
+                            + "need something from the user that you cannot "
+                            + "find out yourself."
+                    ])
+                    turnStatus = plan.current.isEmpty
+                        ? "carrying on…" : "\(plan.current.prefix(40))…"
+                    continue
+                }
+
+                // False incapacity: the model refused (no tool ran, and the
+                // reply reads as "I can't / I don't have / unable to") while it
+                // actually has web_search and web_fetch. Nudge it once, naming
+                // only tools it truly has, and let it try again. Bounded by the
+                // same round ceiling so it can't loop.
+                if !ranAnyTool, !incapacityNudged,
+                   NikitaAgent.looksLikeFalseRefusal(answer) {
+                    incapacityNudged = true
+                    if !answer.isEmpty { appendAssistant(answer) }
+                    wire.append(["role": "assistant", "content": answer])
+                    wire.append([
+                        "role": "user",
+                        "content": "[the app] That is not right -- you were "
+                            + "handed real tools this turn. You can always "
+                            + "search the web with web_search and read pages "
+                            + "with web_fetch, through this phone's connection. "
+                            + "Do not say you can't search or lack internet. "
+                            + "Call the right tool now for what was asked -- "
+                            + "just the call."
+                    ])
+                    turnStatus = "trying again…"
+                    continue
+                }
+
                 appendAssistant(answer.isEmpty ? "…" : answer)
                 return
             }
@@ -146,27 +425,129 @@ public final class NikitaAgent: ObservableObject {
                 reply.content.trimmingCharacters(in: .whitespacesAndNewlines),
                 tools: invocations)
 
-            // Execute each call, feed the result back, update the row.
+            // Execute them, feed the results back in the order they were
+            // asked for, and update each row as it lands.
+            ranAnyTool = true
+            let results = await executeBatch(reply.toolCalls, uiIndex: uiIndex)
+            if Task.isCancelled { return }
             for (i, call) in reply.toolCalls.enumerated() {
-                if Task.isCancelled { return }
-                turnStatus = "running \(call.name)…"
-                let (result, ok) = await execute(
-                    name: call.name, argumentsJSON: call.argumentsJSON)
                 wire.append([
                     "role": "tool",
                     "tool_call_id": call.id,
-                    "content": result
+                    "content": results[i].0
                 ])
-                updateToolRow(
-                    messageIndex: uiIndex, callIndex: i, result: result, ok: ok)
+                _ = i
+                _ = call
             }
-
-            _ = round // loop back for the model's next move
+            publishPlan()
         }
 
-        appendAssistant(
-            "I stopped after \(maxToolRounds) tool rounds without finishing. "
-            + "Tell me the next step and I'll continue.")
+        // Out of rounds. The plan is the honest account of where that leaves
+        // things, and it is still on disk -- so this is a pause, not a loss.
+        publishPlan()
+        if plan.openCount > 0 {
+            let left = plan.items
+                .filter { $0.status != .done }
+                .map { "• \($0.text)" }
+                .joined(separator: "\n")
+            appendAssistant(
+                "I've been going for \(maxToolRounds) rounds on this, so I'm "
+                + "pausing here rather than spinning. Still open:\n\(left)\n\n"
+                + "Say \"continue\" and I'll pick it straight back up — "
+                + "the plan is saved, so it survives closing the app too.")
+        } else {
+            appendAssistant(
+                "I stopped after \(maxToolRounds) tool rounds without "
+                + "finishing. Tell me the next step and I'll continue.")
+        }
+    }
+
+    // MARK: Running a round's tool calls
+
+    // Which tools only LOOK. A read cannot be disturbed by another read, so a
+    // round that asked for several of them should take as long as the slowest
+    // one, not the sum -- and over a Bluetooth link or a bridge to another
+    // machine that difference is seconds, every round. Anything that changes
+    // something stays strictly in order, on its own: two writes to the same
+    // path, or a write and the read that checks it, are not independent, and
+    // reordering them would be a bug nobody could reproduce.
+    private static let readOnlyTools: Set<String> = [
+        "list_memory",
+        "list_files", "read_file", "file_info",
+        "computer_list", "computer_read", "computer_find",
+        "scan_viewer",
+        "web_search", "web_fetch"
+    ]
+
+    // A reply that refuses with an incapacity claim, and nothing was done.
+    // Kept deliberately narrow: phrases people only use to say "I can't",
+    // in English and Portuguese.
+    static func looksLikeFalseRefusal(_ text: String) -> Bool {
+        let t = text.lowercased()
+        let needles = [
+            "i can't", "i cant", "i cannot", "i don't have", "i dont have",
+            "i do not have", "i'm unable", "i am unable", "unable to",
+            "i lack", "no access", "not able to", "no web search",
+            "no internet", "can't search", "cannot search", "can't reach",
+            "don't support", "nao consigo", "não consigo", "nao posso",
+            "não posso", "nao tenho", "não tenho", "sem acesso"
+        ]
+        return needles.contains { t.contains($0) }
+    }
+
+    private static func isParallelSafe(_ name: String) -> Bool {
+        // An MCP tool is never assumed safe to run alongside anything: the
+        // server decides what its tools do, and a name is not a promise.
+        if NikitaMcp.isMcpTool(name) { return false }
+        return readOnlyTools.contains(name)
+    }
+
+    private func executeBatch(
+        _ calls: [KimiClient.RawToolCall], uiIndex: Int
+    ) async -> [(String, Bool)] {
+        var results = [(String, Bool)](
+            repeating: ("", false), count: calls.count)
+        var i = 0
+
+        while i < calls.count {
+            if Task.isCancelled { return results }
+
+            // The longest run of read-only calls starting here.
+            var j = i
+            while j < calls.count, Self.isParallelSafe(calls[j].name) { j += 1 }
+
+            if j - i >= 2 {
+                turnStatus = "running \(j - i) lookups…"
+                await withTaskGroup(of: (Int, (String, Bool)).self) { group in
+                    for k in i..<j {
+                        let call = calls[k]
+                        group.addTask {
+                            let r = await self.execute(
+                                name: call.name,
+                                argumentsJSON: call.argumentsJSON)
+                            return (k, r)
+                        }
+                    }
+                    for await (k, r) in group {
+                        results[k] = r
+                        updateToolRow(
+                            messageIndex: uiIndex, callIndex: k,
+                            result: r.0, ok: r.1)
+                    }
+                }
+                i = j
+            } else {
+                let call = calls[i]
+                turnStatus = "running \(call.name)…"
+                let r = await execute(
+                    name: call.name, argumentsJSON: call.argumentsJSON)
+                results[i] = r
+                updateToolRow(
+                    messageIndex: uiIndex, callIndex: i, result: r.0, ok: r.1)
+                i += 1
+            }
+        }
+        return results
     }
 
     // MARK: Machine bridge
@@ -199,6 +580,66 @@ public final class NikitaAgent: ObservableObject {
         Data(value.utf8).base64EncodedString()
     }
 
+    // An exact-string edit of a file on the bridged computer.
+    //
+    // The replacement happens HERE, on the phone, not in a shell command: the
+    // file comes back, the match is checked and applied in Swift, and the
+    // result is written through the same heredoc computer_write uses. Doing it
+    // with sed instead would mean escaping the model's text into a regular
+    // expression, and any text containing a slash, a bracket or an ampersand
+    // would quietly change meaning -- which is the one thing an exact-string
+    // edit exists to prevent.
+    private func editRemoteFile(
+        path: String, oldString: String, newString: String, replaceAll: Bool
+    ) async throws -> (String, Bool) {
+        guard !path.isEmpty else { return (jsonError("No path given."), false) }
+        guard !oldString.isEmpty else {
+            return (jsonError(
+                "old_string is empty. To create a file use computer_write; to "
+                + "insert, anchor on an existing line."), false)
+        }
+        guard oldString != newString else {
+            return (jsonError(
+                "old_string and new_string are identical — nothing to do."),
+                    false)
+        }
+
+        let before = try await machineRun("host cat \(quoted(path))")
+        let hits = before.components(separatedBy: oldString).count - 1
+        if hits == 0 {
+            return (jsonError(
+                "old_string was not found in \(path). It must match the file "
+                + "EXACTLY, including indentation and whitespace — read the "
+                + "file and copy the text rather than retyping it."), false)
+        }
+        if hits > 1 && !replaceAll {
+            return (jsonError(
+                "old_string appears \(hits) times in \(path), so this edit is "
+                + "ambiguous and was NOT applied. Include more surrounding "
+                + "lines to make it unique, or pass replace_all if you really "
+                + "mean every occurrence."), false)
+        }
+
+        let after: String
+        if replaceAll {
+            after = before.replacingOccurrences(of: oldString, with: newString)
+        } else if let range = before.range(of: oldString) {
+            after = before.replacingCharacters(in: range, with: newString)
+        } else {
+            return (jsonError("Could not locate old_string to replace."), false)
+        }
+
+        let script = "cat > \(quoted(path)) <<'NIKITA_EOF'\n"
+            + after + "\nNIKITA_EOF"
+        _ = try await machineRun("host \(script)")
+        lastSavedPath = path
+        return (jsonOK([
+            "edited": path,
+            "replacements": replaceAll ? hits : 1,
+            "bytes": after.utf8.count
+        ]), true)
+    }
+
     // MARK: Tool execution
 
     private func execute(
@@ -207,14 +648,55 @@ public final class NikitaAgent: ObservableObject {
         let args = parseArgs(argumentsJSON)
 
         // Access filter: a tool whose family the user switched off is refused
-        // with an honest message rather than silently dropped.
-        if !settings.isAllowed(NikitaTools.family(of: name)) {
+        // with an honest message rather than silently dropped. MCP tools are
+        // gated by their own switch inside the client, not by a family here.
+        if !NikitaMcp.isMcpTool(name),
+           !settings.isAllowed(NikitaTools.family(of: name)) {
             return (jsonError("The \(NikitaTools.family(of: name)) tools are "
                 + "switched off in Nikita settings."), false)
         }
 
+        // An MCP tool. Routed first: the name is namespaced, so it cannot
+        // collide with a built-in, and the client handles connecting, timing
+        // out and shaping the result.
+        if NikitaMcp.isMcpTool(name) {
+            return await mcp.call(name, args: args)
+        }
+
         do {
             switch name {
+            case "update_plan":
+                let items = (args["items"] as? [[String: Any]]) ?? []
+                let result = plan.apply(
+                    items: items, note: args["note"] as? String)
+                publishPlan()
+                await pushPlanToCard()   // mirror so qFlipper sees it too
+                return (result, true)
+
+            case "web_search":
+                let query = (args["query"] as? String) ?? ""
+                let hits = try await NikitaWeb.search(query)
+                return (jsonOK([
+                    "query": query,
+                    "results": hits.map {
+                        ["title": $0.title, "url": $0.url,
+                         "snippet": $0.snippet]
+                    }
+                ]), true)
+
+            case "web_fetch":
+                let url = (args["url"] as? String) ?? ""
+                let (text, truncated) = try await NikitaWeb.fetch(url)
+                var payload: [String: Any] = [
+                    "url": url,
+                    "content": text.isEmpty ? "(no readable text)" : text
+                ]
+                if truncated {
+                    payload["truncated"] = true
+                    payload["note"] = "Page was longer than the cap and cut here."
+                }
+                return (jsonOK(payload), true)
+
             case "remember":
                 let fact = (args["fact"] as? String) ?? ""
                 memory.remember(fact)
@@ -258,6 +740,38 @@ public final class NikitaAgent: ObservableObject {
                     + content + "\nNIKITA_EOF"
                 _ = try await machineRun("host \(script)")
                 return (jsonOK(["written": path]), true)
+            case "computer_edit":
+                let path = (args["path"] as? String) ?? ""
+                let oldStr = (args["old_string"] as? String) ?? ""
+                let newStr = (args["new_string"] as? String) ?? ""
+                let all = (args["replace_all"] as? Bool) ?? false
+                return try await editRemoteFile(
+                    path: path, oldString: oldStr,
+                    newString: newStr, replaceAll: all)
+
+            case "computer_grep":
+                let path = (args["path"] as? String) ?? "~"
+                let pattern = (args["pattern"] as? String) ?? ""
+                guard !pattern.isEmpty else {
+                    return (jsonError("No pattern given."), false)
+                }
+                let glob = (args["glob"] as? String) ?? ""
+                let icase = ((args["ignore_case"] as? Bool) ?? false) ? "i" : ""
+                // -I skips binaries, -n numbers the lines, -r walks the tree,
+                // and the include filter is what keeps a repo-wide search from
+                // returning the build directory. head bounds the output at the
+                // far end, because the model pays for every line of it.
+                var cmd = "grep -rn\(icase)IE"
+                if !glob.isEmpty { cmd += " --include=\(quoted(glob))" }
+                cmd += " --exclude-dir=.git --exclude-dir=node_modules"
+                cmd += " --exclude-dir=.build --exclude-dir=DerivedData"
+                cmd += " -e \(quoted(pattern)) \(quoted(path)) | head -200"
+                let out = try await machineRun("host \(cmd)")
+                return (jsonOK([
+                    "pattern": pattern,
+                    "matches": out.isEmpty ? "(no line matched)" : out
+                ]), true)
+
             case "computer_mkdir":
                 let path = (args["path"] as? String) ?? ""
                 _ = try await machineRun("host mkdir -p \(quoted(path))")
@@ -346,10 +860,11 @@ public final class NikitaAgent: ObservableObject {
 
     // MARK: Classification
 
-    // A capable hosted model doesn't need the desktop's aggressive tool pruning;
-    // the only thing this decides is whether to append the device manual and the
-    // "last saved file" anchor. When in doubt, offer tools -- a wrongly-withheld
-    // tool is a worse failure than an unused one.
+    // Kept for the label it produces, and load-bearing for nothing: the tools
+    // are offered on every turn now. A wrongly-withheld tool is the worst
+    // failure here -- the model can then only apologise -- and a tool list that
+    // changes with the phrasing also throws away the cached prompt prefix on
+    // every round, which is most of the latency the user actually feels.
     private func classifyNeedsTools(_ text: String) -> Bool {
         let t = text.lowercased()
         let chatOnly = ["oi", "olá", "ola", "hi", "hello", "hey", "obrigado",
@@ -417,7 +932,9 @@ public final class NikitaAgent: ObservableObject {
             + Double(completion) / 1_000_000 * m.outputPerM
         usage.promptTokens += prompt
         usage.completionTokens += completion
-        usage.turnCostUSD = turn
+        // Accumulate across the turn's rounds so the footer shows the whole
+        // turn's cost, not just the last round. Reset at each turn's start.
+        usage.turnCostUSD += turn
         usage.sessionCostUSD += turn
     }
 

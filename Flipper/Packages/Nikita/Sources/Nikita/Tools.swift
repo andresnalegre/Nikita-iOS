@@ -42,6 +42,52 @@ enum NikitaTools {
         ["type": "boolean", "description": desc]
     }
 
+    static func array(_ desc: String, items: [String: Any]) -> [String: Any] {
+        ["type": "array", "description": desc, "items": items]
+    }
+
+    // MARK: The plan
+    //
+    // The one tool that makes the difference between an errand and an agent:
+    // the loop reads this to decide whether the turn is over, and it is stored
+    // on disk, so the work survives the turn AND the app being closed.
+
+    static var planTool: [String: Any] {
+        function(
+            "update_plan",
+            "Your working plan, carried across turns AND across "
+            + "restarts. Send the WHOLE list every time -- it replaces "
+            + "the stored one. Use it whenever the work is more than a "
+            + "single call: write the steps down BEFORE you start, mark "
+            + "exactly one in_progress, and update it the moment a step "
+            + "finishes. The plan is how the loop knows the job is not "
+            + "over: while any item is pending or in_progress you will "
+            + "be handed the turn again to keep working, and when you "
+            + "come back to this conversation later -- tomorrow, after "
+            + "the app was closed -- the open items are still here and "
+            + "are yours to finish. Clear a finished job by sending the "
+            + "list with every item done, or an empty list. Do not "
+            + "narrate the plan in prose as well; the user can see it.",
+            properties: [
+                "items": array(
+                    "The complete plan, in order.",
+                    items: [
+                        "type": "object",
+                        "properties": [
+                            "text": str("One short imperative step, e.g. "
+                                + "\"Read the config\"."),
+                            "status": str(
+                                "pending, in_progress (at most one) or done.",
+                                enumValues: ["pending", "in_progress", "done"])
+                        ] as [String: Any],
+                        "required": ["text"]
+                    ]),
+                "note": str("Optional one-line note about where the "
+                    + "work stands, kept with the plan.")
+            ],
+            required: ["items"])
+    }
+
     // MARK: Memory (always offered)
 
     static var memoryTools: [[String: Any]] {
@@ -69,7 +115,30 @@ enum NikitaTools {
                 + "facts, or \"all\" to wipe memory.",
                 properties: ["match": str(
                     "Text to match facts to delete, or 'all' to clear everything")],
-                required: ["match"])
+                required: ["match"]),
+            planTool,
+            function(
+                "web_search",
+                "Search the WEB and get back the top results (title, url, "
+                + "snippet). Use it whenever the answer depends on current or "
+                + "external information -- a spec, an error, docs, a price, "
+                + "news, anything you are not sure of from memory. Then read a "
+                + "promising result with web_fetch.",
+                properties: [
+                    "query": str("What to search for, in plain words.")
+                ],
+                required: ["query"]),
+            function(
+                "web_fetch",
+                "Fetch one web page (or a plain-text/JSON URL) and return its "
+                + "readable text, HTML stripped. Use it to actually READ a "
+                + "result web_search found, or any URL the user gives. "
+                + "http/https only.",
+                properties: [
+                    "url": str("The full URL to fetch, e.g. "
+                        + "https://example.com/page")
+                ],
+                required: ["url"])
         ]
     }
 
@@ -220,6 +289,46 @@ enum NikitaTools {
                 ],
                 required: ["path", "pattern"]),
             function(
+                "computer_edit",
+                "Change PART of a text file on the bridged computer, in place, "
+                + "by exact string replacement. This is the RIGHT tool for "
+                + "editing an existing file -- use it instead of "
+                + "computer_write, which replaces the whole file and loses "
+                + "anything you did not retype. Read the file first so "
+                + "old_string is exact: it must match EXACTLY, whitespace and "
+                + "indentation included, and must appear exactly ONCE, or the "
+                + "edit is refused rather than applied to the wrong place. To "
+                + "insert, anchor old_string on an existing line and repeat "
+                + "that line in new_string with your addition. To delete, pass "
+                + "an empty new_string.",
+                properties: [
+                    "path": str("Absolute path of the file to edit."),
+                    "old_string": str("The exact text to replace, copied from "
+                        + "the file including its indentation."),
+                    "new_string": str("What to put there instead. Empty "
+                        + "deletes old_string."),
+                    "replace_all": bool("Replace every occurrence instead of "
+                        + "requiring exactly one. Default false.")
+                ],
+                required: ["path", "old_string", "new_string"]),
+            function(
+                "computer_grep",
+                "Search the CONTENTS of files on the bridged computer for a "
+                + "regular expression, and get back each match with its file "
+                + "and line number. This is how you find where something is "
+                + "defined or used. computer_find searches file NAMES; this "
+                + "searches what is inside them. Narrow it with glob and a "
+                + "specific folder -- a common word across a home directory "
+                + "returns noise.",
+                properties: [
+                    "path": str("Folder to search under, or a single file."),
+                    "pattern": str("Regular expression to look for."),
+                    "glob": str("Only search files matching this wildcard, "
+                        + "e.g. *.swift."),
+                    "ignore_case": bool("Match without regard to case.")
+                ],
+                required: ["path", "pattern"]),
+            function(
                 "computer_write",
                 "Write a text file on the bridged computer, replacing it if it "
                 + "is already there.",
@@ -285,6 +394,11 @@ enum NikitaTools {
     // lands on the narrowest one rather than the widest.
     static func family(of tool: String) -> String {
         switch tool {
+        // Not gated by anything: update_plan touches nothing but Nikita's own
+        // notes, and the loop depends on it. A user who switched off "memory"
+        // did not ask for the agent to stop being able to keep track.
+        case "update_plan": return "plan"
+        case "web_search", "web_fetch": return "web"
         case "remember", "list_memory", "forget": return "memory"
         case "press_button": return "buttons"
         case "run_app": return "apps"
@@ -292,8 +406,9 @@ enum NikitaTools {
             return "files_write"
         case "delete_file": return "files_delete"
         case "run_cli", "scan_viewer": return "serial"
-        case "computer_list", "computer_read", "computer_find":
+        case "computer_list", "computer_read", "computer_find", "computer_grep":
             return "computer_read"
+        case "computer_edit": return "computer_write"
         case "computer_write", "computer_mkdir": return "computer_write"
         case "computer_delete": return "computer_delete"
         case "computer_run": return "computer_run"

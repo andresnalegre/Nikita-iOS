@@ -1,5 +1,6 @@
 import Nikita
 import SwiftUI
+import UIKit
 
 // Nikita's chat screen. A capable model over a plain HTTPS link -- no local
 // runtime, no streaming assembly -- so the view stays simple: a scroll of
@@ -19,17 +20,32 @@ struct NikitaView: View {
     @State private var showSettings = false
     @FocusState private var inputFocused: Bool
     @State private var hasKey = NikitaSettings.shared.hasApiKey
+    @State private var planExpanded = false
+    @State private var pulse = false
+    @StateObject private var dictation = NikitaDictation()
+    // Holds the app awake for the OS-allotted window (tens of seconds, and
+    // a few minutes) so a turn already in flight keeps running when the user
+    // switches to another app, instead of being frozen mid-thought. iOS does
+    // not grant unlimited background time to work like this, so a very long
+    // turn can still be suspended -- but the common case of glancing at another
+    // app while Nikita finishes now survives.
+    @State private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
     var body: some View {
         VStack(spacing: 0) {
             if !hasKey {
                 NikitaSetupBanner { showSettings = true }
             }
+            planStrip
             messagesList
             footer
             inputBar
         }
         .task {
+            // Bring the MCP servers up before the first message, so their
+            // tools are known when the model is first asked to do something
+            // rather than discovered halfway through a turn.
+            await agent.connectMcp()
             if let initialMessage, agent.messages.isEmpty {
                 agent.send(initialMessage)
             }
@@ -58,6 +74,107 @@ struct NikitaView: View {
         }) {
             NavigationView { NikitaSettingsView() }
         }
+        .onChange(of: agent.thinking) { thinking in
+            if thinking { beginBackgroundHold() } else { endBackgroundHold() }
+        }
+    }
+
+    // NIKITA's own list of steps, written with update_plan and kept on disk.
+    // It sits above the conversation rather than inside the settings because
+    // it is the answer to "what is it doing" -- and because it survives the
+    // app closing, so on the next launch this strip is what says the job is
+    // still open when the conversation looks finished.
+    //
+    // Collapsed to the current step by default: while it is working, the next
+    // thing is the only line anyone reads.
+    @ViewBuilder
+    private var planStrip: some View {
+        if !agent.planItems.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text("PLAN")
+                        .font(.system(
+                            size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(.accentColor)
+                    Text(agent.planOpenCount > 0
+                         ? "\(agent.planItems.count - agent.planOpenCount)/"
+                           + "\(agent.planItems.count) done"
+                         : "all done")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(
+                            agent.planOpenCount > 0 ? .secondary : .green)
+                    if !planExpanded, let now = currentPlanItem {
+                        Text("· \(now)")
+                            .font(.system(size: 10, design: .monospaced))
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    Image(systemName: planExpanded
+                          ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10))
+                        .foregroundColor(.secondary)
+                }
+
+                if planExpanded {
+                    ForEach(agent.planItems) { item in
+                        HStack(alignment: .top, spacing: 6) {
+                            Text(mark(for: item.status))
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(colour(for: item.status))
+                            Text(item.text)
+                                .font(.system(
+                                    size: 10,
+                                    weight: item.status == .inProgress
+                                        ? .semibold : .regular,
+                                    design: .monospaced))
+                                .foregroundColor(colour(for: item.status))
+                            Spacer()
+                        }
+                    }
+                    if !agent.planNote.isEmpty {
+                        Text(agent.planNote)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(.secondary)
+                    }
+                    Button("Clear plan") { agent.clearPlan() }
+                        .font(.system(size: 10, design: .monospaced))
+                        .padding(.top, 2)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.secondary.opacity(0.10))
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    planExpanded.toggle()
+                }
+            }
+        }
+    }
+
+    private var currentPlanItem: String? {
+        if let doing = agent.planItems.first(where: {
+            $0.status == .inProgress
+        }) { return doing.text }
+        return agent.planItems.first { $0.status == .pending }?.text
+    }
+
+    private func mark(for status: NikitaPlanItem.Status) -> String {
+        switch status {
+        case .done: return "[x]"
+        case .inProgress: return "[>]"
+        case .pending: return "[ ]"
+        }
+    }
+
+    private func colour(for status: NikitaPlanItem.Status) -> Color {
+        switch status {
+        case .done: return .secondary
+        case .inProgress: return .primary
+        case .pending: return .secondary
+        }
     }
 
     private var messagesList: some View {
@@ -82,30 +199,58 @@ struct NikitaView: View {
         }
     }
 
+    // The live status line, mirroring qFlipper's footer: a pulsing dot, the
+    // elapsed seconds ticking, the tokens climbing, the running cost, and what
+    // it is doing this moment -- all on one line under the conversation. When
+    // idle it collapses to just the session total.
     @ViewBuilder
     private var footer: some View {
         if agent.thinking || agent.usage.sessionCostUSD > 0 {
-            HStack(spacing: 12) {
+            HStack(spacing: 6) {
                 if agent.thinking {
-                    ProgressView().scaleEffect(0.7)
-                    Text(agent.turnStatus.isEmpty ? "thinking…" : agent.turnStatus)
-                }
-                Spacer()
-                if agent.usage.sessionCostUSD > 0 {
+                    Circle()
+                        .fill(Color.accentColor)
+                        .frame(width: 7, height: 7)
+                        .opacity(pulse ? 0.3 : 1.0)
+                        .animation(
+                            .easeInOut(duration: 0.7).repeatForever(),
+                            value: pulse)
+                        .onAppear { pulse = true }
+                        .onDisappear { pulse = false }
+                    Text(agent.turnElapsedText)
+                    if agent.turnTokens > 0 {
+                        Text("· \(compact(agent.turnTokens)) tok")
+                    }
+                    if agent.usage.turnCostUSD > 0 {
+                        Text(String(
+                            format: "· $%.4f", agent.usage.turnCostUSD))
+                    }
+                    let phase = agent.turnStatus.isEmpty
+                        ? "thinking" : agent.turnStatus
+                    Text("· \(phase)")
+                        .lineLimit(1)
+                    Spacer()
+                } else {
+                    Spacer()
                     Text(costText)
                 }
             }
-            .font(.caption2)
+            .font(.system(size: 12, design: .monospaced))
             .foregroundColor(.secondary)
             .padding(.horizontal)
             .padding(.vertical, 4)
         }
     }
 
+    // 1234 -> "1.2k", so a long turn's count stays one glanceable token.
+    private func compact(_ n: Int) -> String {
+        n < 1000 ? "\(n)" : String(format: "%.1fk", Double(n) / 1000)
+    }
+
     private var costText: String {
         let session = agent.usage.sessionCostUSD
         let tokens = agent.usage.promptTokens + agent.usage.completionTokens
-        return String(format: "%d tok · $%.4f", tokens, session)
+        return String(format: "%@ tok · $%.4f", compact(tokens), session)
     }
 
     private var inputBar: some View {
@@ -119,6 +264,22 @@ struct NikitaView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 18))
                 .focused($inputFocused)
                 .disabled(!hasKey)
+
+            // Speak instead of type. While listening, the recognised words
+            // stream straight into the draft (see onChange below) so the user
+            // watches their message appear and can send the instant they stop.
+            if !agent.thinking {
+                Button {
+                    dictation.toggle()
+                } label: {
+                    Image(systemName: dictation.listening
+                          ? "mic.fill" : "mic")
+                        .font(.system(size: 26))
+                        .foregroundColor(dictation.listening
+                                         ? .red : .accentColor)
+                }
+                .disabled(!hasKey)
+            }
 
             if agent.thinking {
                 Button {
@@ -141,13 +302,33 @@ struct NikitaView: View {
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
+        .onChange(of: dictation.transcript) { text in
+            if !text.isEmpty { draft = text }
+        }
     }
 
     private var canSend: Bool {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && hasKey
     }
 
+    private func beginBackgroundHold() {
+        guard bgTask == .invalid else { return }
+        bgTask = UIApplication.shared.beginBackgroundTask(
+            withName: "nikita-turn") {
+            endBackgroundHold()
+        }
+    }
+
+    private func endBackgroundHold() {
+        guard bgTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(bgTask)
+        bgTask = .invalid
+    }
+
     private func send() {
+        // If the mic is still open, close it first so the final words land and
+        // the recognizer releases the audio session before the turn starts.
+        if dictation.listening { dictation.stop() }
         let text = draft
         draft = ""
         agent.send(text)

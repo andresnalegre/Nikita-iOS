@@ -29,6 +29,30 @@ struct LiveDeviceBridge: NikitaDeviceBridge {
         }
     }
 
+    // The Flipper's own hardware id, read from the device info the RPC session
+    // already fetched. Falls back to the device NAME while that has not been
+    // read yet -- unique in practice among the Flippers one person owns, which
+    // is the population that matters for scoping.
+    //
+    // Deliberately NOT deps.device.flipper?.id: that is CoreBluetooth's
+    // per-installation UUID, which identifies this phone's view of the device
+    // rather than the device, and so would not match what the desktop sees for
+    // the same Flipper.
+    var deviceIdentity: String? {
+        get async {
+            await MainActor.run {
+                guard deps.device.flipper != nil else { return nil }
+                // deps.device.info is the RPC device-info the session already
+                // fetched; hardware.uid is the Flipper's own id.
+                if let uid = deps.device.info.hardware.uid, !uid.isEmpty {
+                    return uid
+                }
+                let name = deps.device.flipper?.name ?? ""
+                return name.isEmpty ? nil : name
+            }
+        }
+    }
+
     // MARK: Files
 
     func listFiles(at path: String) async throws -> [NikitaFileEntry] {

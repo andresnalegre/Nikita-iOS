@@ -2,9 +2,9 @@ import Nikita
 import SwiftUI
 
 // Setup for Nikita: the Kimi API key (write-only to the UI, stored in the
-// Keychain), the model picker, and the per-family access filters. "Erase"
-// wipes the key and turns every filter off -- erase means disconnect, the same
-// contract as the desktop.
+// Keychain), the model picker, the per-family access filters, and the MCP tool
+// servers. "Erase" wipes the key, the servers and their tokens and turns every
+// filter off -- erase means disconnect, the same contract as the desktop.
 struct NikitaSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     private let settings = NikitaSettings.shared
@@ -15,6 +15,17 @@ struct NikitaSettingsView: View {
     @State private var filters: [String: Bool] = [:]
     @State private var hasStoredKey = NikitaSettings.shared.hasApiKey
     @State private var showEraseConfirm = false
+
+    // Its own client, not the agent's: this screen needs to show whether a
+    // server actually answers, and it has to be able to try again after an
+    // edit. The agent keeps its own and reads the same stored config.
+    @StateObject private var mcp = NikitaMcp()
+    @State private var mcpOn = NikitaSettings.shared.mcpEnabled
+    @State private var servers = NikitaSettings.shared.mcpServers
+    @State private var showAddServer = false
+    @State private var draftName = ""
+    @State private var draftURL = ""
+    @State private var draftToken = ""
 
     var body: some View {
         Form {
@@ -94,6 +105,8 @@ struct NikitaSettingsView: View {
                      + "own terminal.")
             }
 
+            mcpSection
+
             Section {
                 Button("Allow everything") { setAll(true) }
                 Button("Allow nothing", role: .destructive) { setAll(false) }
@@ -106,7 +119,8 @@ struct NikitaSettingsView: View {
                     Label("Erase Nikita data", systemImage: "trash")
                 }
             } footer: {
-                Text("Removes the API key and switches every access filter off.")
+                Text("Removes the API key and the MCP servers, and switches "
+                     + "every access filter off.")
             }
         }
         .navigationTitle("Nikita")
@@ -116,7 +130,11 @@ struct NikitaSettingsView: View {
                 Button("Done") { dismiss() }
             }
         }
-        .onAppear(perform: loadFilters)
+        .onAppear {
+            loadFilters()
+            Task { await mcp.reload() }
+        }
+        .sheet(isPresented: $showAddServer) { addServerSheet }
         .confirmationDialog(
             "Erase all Nikita data?",
             isPresented: $showEraseConfirm,
@@ -125,6 +143,185 @@ struct NikitaSettingsView: View {
             Button("Erase", role: .destructive) { erase() }
             Button("Cancel", role: .cancel) {}
         }
+    }
+
+    // MARK: MCP
+    //
+    // Tool servers, over the same protocol Claude Code speaks. HTTP only, and
+    // that is a platform fact rather than a choice: the usual MCP transport is
+    // a child process on stdin/stdout, and an iOS app cannot start one. A
+    // stdio-only server goes behind a small HTTP proxy on the computer and
+    // this talks to that.
+
+    @ViewBuilder
+    private var mcpSection: some View {
+        Section {
+            Toggle("Use MCP servers", isOn: Binding(
+                get: { mcpOn },
+                set: {
+                    mcpOn = $0
+                    settings.mcpEnabled = $0
+                    Task { await mcp.reload() }
+                }))
+
+            if mcpOn {
+                ForEach(mcp.states) { state in
+                    serverRow(state)
+                }
+                // A configured server that has not answered yet still needs a
+                // row, or removing it is impossible until it connects.
+                ForEach(servers.filter { s in
+                    !mcp.states.contains { $0.name == s.name }
+                }) { server in
+                    HStack {
+                        Text(server.name)
+                        Spacer()
+                        Text("not connected")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .onDelete(perform: removeServer)
+
+                Button {
+                    draftName = ""
+                    draftURL = ""
+                    draftToken = ""
+                    showAddServer = true
+                } label: {
+                    Label("Add a server", systemImage: "plus")
+                }
+
+                if !mcp.states.isEmpty {
+                    Button {
+                        Task { await mcp.reload() }
+                    } label: {
+                        Label(mcp.busy ? "Connecting…" : "Reconnect",
+                              systemImage: "arrow.clockwise")
+                    }
+                    .disabled(mcp.busy)
+                }
+            }
+        } header: {
+            Text("MCP servers")
+        } footer: {
+            Text(mcpOn
+                 ? mcp.statusLine + ". Their tools are offered to Nikita "
+                   + "alongside its own, named mcp__<server>__<tool>."
+                 : "Off: no MCP tools are offered.")
+        }
+    }
+
+    @ViewBuilder
+    private func serverRow(_ state: NikitaMcp.State) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Circle()
+                    .fill(colour(for: state.status))
+                    .frame(width: 8, height: 8)
+                Text(state.name)
+                Spacer()
+                Text(state.status == "ready"
+                     ? "\(state.toolCount) tool(s)" : state.status)
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+            }
+            if !state.error.isEmpty {
+                Text(state.error)
+                    .font(.system(size: 12))
+                    .foregroundColor(.orange)
+            } else if !state.label.isEmpty {
+                Text(state.label)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+            }
+        }
+        .swipeActions {
+            Button(role: .destructive) {
+                delete(named: state.name)
+            } label: {
+                Label("Remove", systemImage: "trash")
+            }
+        }
+    }
+
+    private func colour(for status: String) -> Color {
+        switch status {
+        case "ready": return .green
+        case "failed": return .orange
+        case "connecting": return .yellow
+        default: return .secondary
+        }
+    }
+
+    @ViewBuilder
+    private var addServerSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name, e.g. github", text: $draftName)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    TextField("https://…/mcp", text: $draftURL)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                } footer: {
+                    Text("The name becomes part of every tool's name, so keep "
+                         + "it short and stable.")
+                }
+                Section {
+                    SecureField("Bearer token (optional)", text: $draftToken)
+                } footer: {
+                    Text("Sent as the Authorization header and stored in the "
+                         + "iOS Keychain, never in plain settings.")
+                }
+            }
+            .navigationTitle("Add MCP server")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showAddServer = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") { saveServer() }
+                        .disabled(!draftIsUsable)
+                }
+            }
+        }
+    }
+
+    private var draftIsUsable: Bool {
+        let name = draftName.trimmingCharacters(in: .whitespaces)
+        let url = draftURL.trimmingCharacters(in: .whitespaces)
+        return !name.isEmpty && URL(string: url)?.scheme != nil
+    }
+
+    private func saveServer() {
+        let name = draftName.trimmingCharacters(in: .whitespaces)
+        let url = draftURL.trimmingCharacters(in: .whitespaces)
+        let token = draftToken.trimmingCharacters(in: .whitespaces)
+        settings.addOrUpdateMcpServer(
+            .init(name: name, url: url),
+            token: token.isEmpty ? nil : token)
+        servers = settings.mcpServers
+        showAddServer = false
+        Task { await mcp.reload() }
+    }
+
+    private func removeServer(at offsets: IndexSet) {
+        let pending = servers.filter { s in
+            !mcp.states.contains { $0.name == s.name }
+        }
+        for i in offsets where pending.indices.contains(i) {
+            delete(named: pending[i].name)
+        }
+    }
+
+    private func delete(named name: String) {
+        settings.removeMcpServer(named: name)
+        servers = settings.mcpServers
+        Task { await mcp.reload() }
     }
 
     // Split the way the risk splits: what stays on the Flipper, and what
@@ -184,6 +381,9 @@ struct NikitaSettingsView: View {
         keyDraft = ""
         hasStoredKey = false
         model = settings.model
+        servers = []
+        mcpOn = settings.mcpEnabled
         loadFilters()
+        Task { await mcp.reload() }
     }
 }

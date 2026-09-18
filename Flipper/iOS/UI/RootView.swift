@@ -6,6 +6,10 @@ import SwiftUI
 public struct RootView: View {
     @StateObject var dependencies: Dependencies = .shared
     @StateObject var overlayController: OverlayController = .init()
+    // The Flipper->Nikita relay, alive for the app's lifetime so the Buddy is
+    // answered over BLE no matter which tab is open.
+    @StateObject private var nikitaBuddy = NikitaBuddyService()
+    @Environment(\.scenePhase) private var buddyScenePhase
 
     public init() {}
 
@@ -29,6 +33,12 @@ public struct RootView: View {
             .environmentObject(dependencies.infraredModel)
             .environmentObject(Notifications.shared)
             .environmentObject(overlayController)
+            .task { nikitaBuddy.activate() }
+            .onChange(of: buddyScenePhase) { phase in
+                // Re-arm the relay each time the app returns to the foreground;
+                // iOS suspends the poll while backgrounded.
+                if phase == .active { nikitaBuddy.activate() }
+            }
     }
 }
 
