@@ -51,7 +51,14 @@ public final class NikitaExtras: ObservableObject {
         var quickCommands: [NikitaQuickCommand]
         var skills: [NikitaLearnedSkill]
         var plugins: [NikitaPlugin]
+        var touched: String?
     }
+
+    // When the local store changes, this fires so the agent can push it to the
+    // shared Flipper SD card. Set by NikitaAgent; nil until then.
+    public var syncHook: (() -> Void)?
+    // ISO8601 of the last local change, for last-writer-wins across clients.
+    public private(set) var touched = ""
 
     private var url: URL {
         let dir = FileManager.default.urls(
@@ -74,14 +81,55 @@ public final class NikitaExtras: ObservableObject {
         quickCommands = s.quickCommands
         skills = s.skills
         plugins = s.plugins
+        touched = s.touched ?? ""
     }
 
+    // A local change: stamp it, persist, and push to the shared card.
     private func save() {
+        touched = ISO8601DateFormatter().string(from: Date())
+        writeLocal()
+        syncHook?()
+    }
+
+    private func writeLocal() {
         let s = Store(
-            quickCommands: quickCommands, skills: skills, plugins: plugins)
+            quickCommands: quickCommands, skills: skills, plugins: plugins,
+            touched: touched.isEmpty ? nil : touched)
         if let data = try? JSONEncoder().encode(s) {
             try? data.write(to: url)
         }
+    }
+
+    // MARK: cross-client sync (through the Flipper SD)
+
+    // The store as JSON to write to /ext/nikita/extras.json.
+    public func exportJSON() -> String {
+        let s = Store(
+            quickCommands: quickCommands, skills: skills, plugins: plugins,
+            touched: touched.isEmpty ? nil : touched)
+        guard let data = try? JSONEncoder().encode(s),
+              let str = String(data: data, encoding: .utf8) else { return "" }
+        return str
+    }
+
+    // Adopt the card's store when it is newer than ours. Returns true if it did.
+    // Does NOT fire syncHook (no write-back loop) -- it just persists locally.
+    @discardableResult
+    public func importJSON(_ json: String) -> Bool {
+        guard let data = json.data(using: .utf8),
+              let s = try? JSONDecoder().decode(Store.self, from: data)
+        else { return false }
+        let cardTouched = s.touched ?? ""
+        // Newer only. Empty local always yields to a stamped card copy.
+        if !cardTouched.isEmpty && (touched.isEmpty || cardTouched > touched) {
+            quickCommands = s.quickCommands
+            skills = s.skills
+            plugins = s.plugins
+            touched = cardTouched
+            writeLocal()
+            return true
+        }
+        return false
     }
 
     private func seedIfEmpty() {

@@ -127,6 +127,32 @@ public final class NikitaAgent: ObservableObject {
         mcp.setDeviceIdentity(await bridge.deviceIdentity)
         await mcp.reload()
         if relayEnabled { startBuddyPoll() }
+        // Keep the "+" store (skills/plugins/quick commands) in sync with the
+        // other clients through the Flipper SD: adopt anything newer on the
+        // card, then push ours, and push again whenever it changes locally.
+        NikitaExtras.shared.syncHook = { [weak self] in
+            Task { await self?.syncExtrasToFlipper() }
+        }
+        await readPortableExtras()
+        await syncExtrasToFlipper()
+    }
+
+    // MARK: "+" store sync (shared via the Flipper SD)
+
+    private func syncExtrasToFlipper() async {
+        guard await bridge.isConnected else { return }
+        let body = NikitaExtras.shared.exportJSON()
+        guard !body.isEmpty else { return }
+        try? await bridge.makeDir(at: "/ext/nikita")
+        try? await bridge.writeFile(
+            at: "/ext/nikita/extras.json", content: body)
+    }
+
+    private func readPortableExtras() async {
+        guard await bridge.isConnected else { return }
+        guard let json = try? await bridge.readFile(
+            at: "/ext/nikita/extras.json"), !json.isEmpty else { return }
+        NikitaExtras.shared.importJSON(json)
     }
 
     private func startBuddyPoll() {
