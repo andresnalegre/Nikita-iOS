@@ -30,15 +30,92 @@ enum NikitaWeb {
 
     // MARK: Search
 
-    static func search(_ query: String) async throws -> [Result] {
+    static func search(_ query: String, braveKey: String = "") async throws
+        -> [Result] {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
+        // Brave Search API first when a key is set: real ranked results, no
+        // captcha. Falls through to the keyless chain on any failure.
+        if !braveKey.isEmpty, let brave = try? await braveSearch(trimmed, key: braveKey),
+           !brave.isEmpty {
+            return brave
+        }
         var comps = URLComponents(
             string: "https://html.duckduckgo.com/html/")!
         comps.queryItems = [URLQueryItem(name: "q", value: trimmed)]
         let (data, _) = try await session.data(from: comps.url!)
         let html = String(decoding: data, as: UTF8.self)
-        return parseResults(html)
+        let scraped = parseResults(html)
+        if !scraped.isEmpty { return scraped }
+        // The HTML endpoint serves a bot-wall to scripted requests; fall back to
+        // the keyless Instant Answer JSON API, which never captchas (but only
+        // covers notable entities/topics, not private individuals).
+        return (try? await instantAnswer(trimmed)) ?? []
+    }
+
+    private static func braveSearch(_ query: String, key: String) async throws
+        -> [Result] {
+        var comps = URLComponents(
+            string: "https://api.search.brave.com/res/v1/web/search")!
+        comps.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "count", value: "8")
+        ]
+        var req = URLRequest(url: comps.url!)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue(key, forHTTPHeaderField: "X-Subscription-Token")
+        req.timeoutInterval = 20
+        let (data, resp) = try await session.data(for: req)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200,
+              let obj = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              let web = obj["web"] as? [String: Any],
+              let results = web["results"] as? [[String: Any]]
+        else { return [] }
+        return results.prefix(8).compactMap { r in
+            guard let title = r["title"] as? String,
+                  let url = r["url"] as? String else { return nil }
+            return Result(
+                title: String(title.prefix(200)),
+                url: url,
+                snippet: String(((r["description"] as? String) ?? "").prefix(300)))
+        }
+    }
+
+    private static func instantAnswer(_ query: String) async throws -> [Result] {
+        var comps = URLComponents(string: "https://api.duckduckgo.com/")!
+        comps.queryItems = [
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "no_html", value: "1"),
+            URLQueryItem(name: "no_redirect", value: "1")
+        ]
+        let (data, _) = try await session.data(from: comps.url!)
+        guard let obj = try? JSONSerialization.jsonObject(with: data)
+            as? [String: Any] else { return [] }
+        var out: [Result] = []
+        if let abstract = obj["AbstractText"] as? String, !abstract.isEmpty {
+            out.append(.init(
+                title: (obj["Heading"] as? String) ?? query,
+                url: (obj["AbstractURL"] as? String) ?? "",
+                snippet: String(abstract.prefix(500))))
+        }
+        func take(_ arr: [[String: Any]]) {
+            for t in arr where out.count < 8 {
+                if let topics = t["Topics"] as? [[String: Any]] {
+                    take(topics); continue
+                }
+                guard let text = t["Text"] as? String, !text.isEmpty else {
+                    continue
+                }
+                out.append(.init(
+                    title: String(text.prefix(80)),
+                    url: (t["FirstURL"] as? String) ?? "",
+                    snippet: String(text.prefix(300))))
+            }
+        }
+        if let rt = obj["RelatedTopics"] as? [[String: Any]] { take(rt) }
+        return out
     }
 
     private static func parseResults(_ html: String) -> [Result] {

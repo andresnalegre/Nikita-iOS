@@ -15,6 +15,8 @@ struct NikitaSettingsView: View {
     @State private var filters: [String: Bool] = [:]
     @State private var hasStoredKey = NikitaSettings.shared.hasApiKey
     @State private var showEraseConfirm = false
+    @State private var braveDraft = ""
+    @State private var hasBrave = NikitaSettings.shared.hasBraveKey
 
     // Its own client, not the agent's: this screen needs to show whether a
     // server actually answers, and it has to be able to try again after an
@@ -103,6 +105,42 @@ struct NikitaSettingsView: View {
                      + "turn them on, and \"run commands\" is a shell on that "
                      + "computer -- give it out as carefully as you would your "
                      + "own terminal.")
+            }
+
+            Section {
+                if hasBrave && braveDraft.isEmpty {
+                    HStack {
+                        Image(systemName: "checkmark.seal.fill")
+                            .foregroundColor(.green)
+                        Text("Brave key saved — deep search on")
+                        Spacer()
+                        Button("Replace") { hasBrave = false }
+                            .font(.footnote)
+                    }
+                    Button("Remove key", role: .destructive) {
+                        settings.clearBraveKey()
+                        hasBrave = false
+                        braveDraft = ""
+                    }
+                } else {
+                    SecureField("Brave Search API key", text: $braveDraft)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                    Button("Save key") {
+                        settings.setBraveKey(braveDraft)
+                        braveDraft = ""
+                        hasBrave = settings.hasBraveKey
+                    }
+                    .disabled(braveDraft.trimmingCharacters(
+                        in: .whitespaces).isEmpty)
+                }
+            } header: {
+                Text("Web search")
+            } footer: {
+                Text("Optional. A free Brave Search key (2000/mo at "
+                     + "brave.com/search/api) gives real ranked results, no "
+                     + "captcha. Without it, search falls back to keyless "
+                     + "sources that cover topics but not private people.")
             }
 
             mcpSection
@@ -378,6 +416,8 @@ struct NikitaSettingsView: View {
 
     private func erase() {
         settings.wipe()
+        braveDraft = ""
+        hasBrave = false
         keyDraft = ""
         hasStoredKey = false
         model = settings.model

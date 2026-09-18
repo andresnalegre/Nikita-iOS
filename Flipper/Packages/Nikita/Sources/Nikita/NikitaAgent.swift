@@ -302,6 +302,7 @@ public final class NikitaAgent: ObservableObject {
         var planContinuations = 0
         var ranAnyTool = false
         var incapacityNudged = false
+        var promisedMoreCount = 0
 
         var round = 0
         while round < maxToolRounds {
@@ -379,6 +380,26 @@ public final class NikitaAgent: ObservableObject {
                     ])
                     turnStatus = plan.current.isEmpty
                         ? "carrying on…" : "\(plan.current.prefix(40))…"
+                    continue
+                }
+
+                // Dying halfway: it ran tools, then signed off announcing a
+                // next step ("let me...", "I'll open...", "vou...") instead of
+                // taking it. Push it to actually continue. Bounded.
+                if ranAnyTool, promisedMoreCount < 6,
+                   NikitaAgent.looksLikePromiseToContinue(answer) {
+                    promisedMoreCount += 1
+                    if !answer.isEmpty { appendAssistant(answer) }
+                    wire.append(["role": "assistant", "content": answer])
+                    wire.append([
+                        "role": "user",
+                        "content": "[the app] You announced a next step and "
+                            + "then stopped. Take it NOW with a tool -- do not "
+                            + "describe it. Keep going until the task is truly "
+                            + "finished, then answer. If it IS finished, say so "
+                            + "plainly."
+                    ])
+                    turnStatus = "continuing…"
                     continue
                 }
 
@@ -491,6 +512,22 @@ public final class NikitaAgent: ObservableObject {
             "no internet", "can't search", "cannot search", "can't reach",
             "don't support", "nao consigo", "não consigo", "nao posso",
             "não posso", "nao tenho", "não tenho", "sem acesso"
+        ]
+        return needles.contains { t.contains($0) }
+    }
+
+    // A reply that announces a next action instead of taking it, after real
+    // work happened. Action-intent phrases only (not "let me know").
+    static func looksLikePromiseToContinue(_ text: String) -> Bool {
+        let t = text.lowercased()
+        let needles = [
+            "let me try", "let me search", "let me open", "let me check",
+            "let me pull", "let me get", "let me look", "let me fetch",
+            "let me run", "i'll try", "i'll search", "i'll open", "i'll check",
+            "i'll pull", "i'll get", "i'll look", "i'll fetch", "i'll run",
+            "next i'll", "now i'll", "still working", "continuing",
+            "one moment", "vou tentar", "vou buscar", "vou abrir",
+            "vou procurar", "deixa eu", "agora vou", "ainda estou"
         ]
         return needles.contains { t.contains($0) }
     }
@@ -675,7 +712,8 @@ public final class NikitaAgent: ObservableObject {
 
             case "web_search":
                 let query = (args["query"] as? String) ?? ""
-                let hits = try await NikitaWeb.search(query)
+                let hits = try await NikitaWeb.search(
+                    query, braveKey: settings.braveKey)
                 return (jsonOK([
                     "query": query,
                     "results": hits.map {

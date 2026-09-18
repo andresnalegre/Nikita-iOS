@@ -198,6 +198,18 @@ public final class NikitaSettings {
 
     public func clearApiKey() { deleteKeychain(account: keychainAccount) }
 
+    // MARK: Brave Search key (optional; enables robust ranked web search)
+
+    private var braveAccount: String { "one.flipper.nikita.bravekey" }
+    public var braveKey: String { readKeychain(account: braveAccount) }
+    public var hasBraveKey: Bool { !braveKey.isEmpty }
+    public func setBraveKey(_ key: String) {
+        let t = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        deleteKeychain(account: braveAccount)
+        if !t.isEmpty { writeKeychain(t, account: braveAccount) }
+    }
+    public func clearBraveKey() { deleteKeychain(account: braveAccount) }
+
     // One set of Keychain calls, used by the API key and by every MCP token.
 
     private func writeKeychain(_ value: String, account: String) {
@@ -243,6 +255,7 @@ public final class NikitaSettings {
     public func wipe() {
         clearApiKey()
         for server in mcpServers { setMcpToken("", for: server.name) }
+        clearBraveKey()
         defaults.removeObject(forKey: Keys.mcpServers)
         defaults.removeObject(forKey: Keys.mcpEnabled)
         enabled = false
