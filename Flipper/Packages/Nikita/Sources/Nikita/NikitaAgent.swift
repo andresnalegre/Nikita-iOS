@@ -136,6 +136,7 @@ public final class NikitaAgent: ObservableObject {
         }
         await readPortableExtras()
         await syncExtrasToFlipper()
+        await readPortableHistory()
         startScheduler()
     }
 
@@ -180,6 +181,75 @@ public final class NikitaAgent: ObservableObject {
         guard let json = try? await bridge.readFile(
             at: "/ext/nikita/extras.json"), !json.isEmpty else { return }
         NikitaExtras.shared.importJSON(json)
+    }
+
+    // MARK: shared conversation context (via the Flipper SD)
+
+    private var historyTouched = ""
+
+    // The clean user/assistant slice, wrapped with a timestamp -- the same
+    // shape qFlipper writes, so the two share one conversation context.
+    private func exportHistoryJSON() -> String {
+        let convo: [[String: String]] = messages.compactMap { m in
+            switch m.role {
+            case .user where !m.text.isEmpty:
+                return ["role": "user", "content": m.text]
+            case .assistant where !m.text.isEmpty:
+                return ["role": "assistant", "content": m.text]
+            default: return nil
+            }
+        }.suffix(30).map { $0 }
+        let wrap: [String: Any] = ["touched": historyTouched, "messages": convo]
+        guard let d = try? JSONSerialization.data(withJSONObject: wrap),
+              let s = String(data: d, encoding: .utf8) else { return "" }
+        return s
+    }
+
+    private func syncHistoryToFlipper() async {
+        guard await bridge.isConnected else { return }
+        historyTouched = ISO8601DateFormatter().string(from: Date())
+        let body = exportHistoryJSON()
+        guard !body.isEmpty else { return }
+        try? await bridge.makeDir(at: "/ext/nikita")
+        try? await bridge.writeFile(
+            at: "/ext/nikita/history.json", content: body)
+    }
+
+    // Adopt the card's conversation when it is newer, rebuilding both the UI
+    // messages and the wire context so Nikita continues where the other client
+    // left off.
+    private func readPortableHistory() async {
+        guard await bridge.isConnected else { return }
+        guard let json = try? await bridge.readFile(
+            at: "/ext/nikita/history.json"), !json.isEmpty,
+            let d = json.data(using: .utf8),
+            let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any]
+        else { return }
+        let cardTouched = (o["touched"] as? String) ?? ""
+        guard !cardTouched.isEmpty,
+              historyTouched.isEmpty || cardTouched > historyTouched,
+              let arr = o["messages"] as? [[String: Any]] else { return }
+        // Only adopt into an empty/echo session, never clobber a live thread the
+        // user is mid-conversation in on this device.
+        guard messages.filter({ $0.role == .user }).isEmpty else { return }
+        var rebuilt: [NikitaChatMessage] = []
+        var newWire: [[String: Any]] = []
+        for m in arr {
+            let role = (m["role"] as? String) ?? ""
+            let content = (m["content"] as? String) ?? ""
+            if content.isEmpty { continue }
+            if role == "user" {
+                rebuilt.append(.init(role: .user, text: content))
+            } else if role == "assistant" {
+                rebuilt.append(.init(role: .assistant, text: content))
+            }
+            newWire.append(["role": role, "content": content])
+        }
+        if !rebuilt.isEmpty {
+            messages = rebuilt
+            wire = newWire
+            historyTouched = cardTouched
+        }
     }
 
     private func startBuddyPoll() {
@@ -464,6 +534,9 @@ public final class NikitaAgent: ObservableObject {
                 let reply = messages.last { $0.role == .assistant }?.text ?? ""
                 Task { await writeBuddyReply(id, reply) }
             }
+            // Mirror the conversation context to the card so the same chat
+            // continues on qFlipper (and back).
+            Task { await syncHistoryToFlipper() }
         }
 
         let key = settings.revealApiKey()
