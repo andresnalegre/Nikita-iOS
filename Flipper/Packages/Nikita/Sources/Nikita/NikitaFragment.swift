@@ -132,7 +132,24 @@ public final class NikitaFragment: ObservableObject, Identifiable {
                 properties: [
                     "command": NikitaTools.str("The shell command to run.")
                 ],
-                required: ["command"])
+                required: ["command"]),
+            NikitaTools.function(
+                "python_run",
+                "Run Python 3 in Nikita's env on the bridged computer "
+                + "(matplotlib/pandas/Pillow/cairosvg/pypdf/qrcode). Best for "
+                + "charts, images, data, PDF, binaries.",
+                properties: ["code": NikitaTools.str("The Python 3 source.")],
+                required: ["code"]),
+            NikitaTools.function(
+                "http_request",
+                "HTTP request to any URL (method/headers/body); returns "
+                + "status+body. A real API client, works without a bridge.",
+                properties: [
+                    "url": NikitaTools.str("Full http/https URL."),
+                    "method": NikitaTools.str("GET/POST/PUT/PATCH/DELETE."),
+                    "body": NikitaTools.str("Optional request body.")
+                ],
+                required: ["url"])
         ]
     }
 
@@ -233,6 +250,44 @@ public final class NikitaFragment: ObservableObject, Identifiable {
             do {
                 let out = try await machine.send("host \(command)")
                 return json(["output": out.isEmpty ? "(no output)" : out])
+            } catch {
+                return json(["error": error.localizedDescription])
+            }
+        case "python_run":
+            let code = (args["code"] as? String) ?? ""
+            setStatus("python")
+            guard let machine, await machine.isBridgeConnected else {
+                return json(["error": "No computer bridged."])
+            }
+            let b64 = Data(code.utf8).base64EncodedString()
+            let cmd = "PY=\"$HOME/.nikita/venv/bin/python3\"; "
+                + "[ -x \"$PY\" ] || PY=\"$HOME/.nikita/venv/bin/python\"; "
+                + "[ -x \"$PY\" ] || PY=python3; "
+                + "echo \(b64) | base64 -d | \"$PY\" -"
+            do {
+                let out = try await machine.send("host \(cmd)")
+                return json(["output": out.isEmpty ? "(no output)" : out])
+            } catch {
+                return json(["error": error.localizedDescription])
+            }
+        case "http_request":
+            let urlStr = (args["url"] as? String) ?? ""
+            setStatus("http: \(urlStr)")
+            guard let url = URL(string: urlStr),
+                  let sc = url.scheme?.lowercased(), sc == "http" || sc == "https"
+            else { return json(["error": "url must be http/https"]) }
+            var req = URLRequest(url: url)
+            req.httpMethod = ((args["method"] as? String) ?? "GET").uppercased()
+            if let body = args["body"] as? String, !body.isEmpty {
+                req.httpBody = body.data(using: .utf8)
+                req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            }
+            req.timeoutInterval = 30
+            do {
+                let (data, resp) = try await URLSession.shared.data(for: req)
+                let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                let text = String(data: data.prefix(12000), encoding: .utf8) ?? "(binary)"
+                return json(["status": status, "body": text])
             } catch {
                 return json(["error": error.localizedDescription])
             }
