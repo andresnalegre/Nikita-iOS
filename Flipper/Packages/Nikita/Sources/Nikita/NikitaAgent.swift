@@ -47,6 +47,9 @@ public final class NikitaAgent: ObservableObject {
     private var buddyReqId: UInt32?
     private var buddyLastHandled: UInt32 = 0
     private var buddySeeded = false
+    // Images computer_view loaded this round (data: URLs), fed to the model as
+    // a vision message when the tool round ends.
+    private var pendingViewImages: [String] = []
     private var buddyPoll: Task<Void, Never>?
 
     // The plan the model maintains, and what the UI shows of it.
@@ -522,6 +525,7 @@ public final class NikitaAgent: ObservableObject {
         turnElapsed = 0
         turnTokens = 0
         usage.turnCostUSD = 0
+        pendingViewImages.removeAll()
         startTicker()
         defer {
             stopTicker()
@@ -729,6 +733,20 @@ public final class NikitaAgent: ObservableObject {
                 ])
                 _ = i
                 _ = call
+            }
+            // computer_view loaded image(s): feed them to the model as a vision
+            // message so it actually looks on the next round. After all tool
+            // results, so message ordering stays valid.
+            if !pendingViewImages.isEmpty {
+                var parts: [[String: Any]] = [[
+                    "type": "text",
+                    "text": "[the app] Here are the image(s) you asked to view."
+                ]]
+                for durl in pendingViewImages {
+                    parts.append(["type": "image_url", "image_url": ["url": durl]])
+                }
+                pendingViewImages.removeAll()
+                wire.append(["role": "user", "content": parts])
             }
             publishPlan()
         }
@@ -963,6 +981,37 @@ public final class NikitaAgent: ObservableObject {
         return jsonOK(["status": status, "body": text])
     }
 
+    // Load an image from the bridged computer and queue it to be shown to the
+    // model on its next step (fed as a vision message when the round ends).
+    private func viewImage(_ args: [String: Any]) async -> String {
+        let path = (args["path"] as? String) ?? ""
+        let ext = (path as NSString).pathExtension.lowercased()
+        let imgExts = ["png", "jpg", "jpeg", "gif", "webp", "bmp"]
+        guard imgExts.contains(ext) else {
+            return jsonOK(["error": "not an image (\(ext)); render to PNG first"])
+        }
+        guard let machine, await machine.isBridgeConnected else {
+            return jsonOK(["error": "No computer bridged."])
+        }
+        do {
+            let b64 = try await machine.send(
+                "host base64 \(quoted(path))")
+                .replacingOccurrences(of: "\n", with: "")
+                .trimmingCharacters(in: .whitespaces)
+            guard !b64.isEmpty, b64.count < 14_000_000 else {
+                return jsonOK(["error": "image missing or too large to view"])
+            }
+            let mime = ext == "png" ? "image/png" : ext == "gif" ? "image/gif"
+                : ext == "webp" ? "image/webp" : ext == "bmp" ? "image/bmp"
+                : "image/jpeg"
+            pendingViewImages.append("data:\(mime);base64,\(b64)")
+            return jsonOK(["ok": true,
+                "note": "Image loaded; you'll see it on your next step."])
+        } catch {
+            return jsonOK(["error": error.localizedDescription])
+        }
+    }
+
     private func machineRun(_ command: String) async throws -> String {
         guard let machine, await machine.isBridgeConnected else {
             throw NikitaDeviceError.failed(
@@ -1151,6 +1200,9 @@ public final class NikitaAgent: ObservableObject {
 
             case "http_request":
                 return (try await httpRequest(args), true)
+
+            case "computer_view":
+                return (await viewImage(args), true)
 
             case "remember":
                 let fact = (args["fact"] as? String) ?? ""

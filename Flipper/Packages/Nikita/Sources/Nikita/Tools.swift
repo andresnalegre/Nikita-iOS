@@ -450,6 +450,14 @@ enum NikitaTools {
                 properties: ["command": str("The shell command to run.")],
                 required: ["command"]),
             function(
+                "computer_view",
+                "LOOK at an image file on the bridged computer -- a screenshot, "
+                + "photo, chart, diagram, or a PNG you just rendered. Give the "
+                + "path; you will SEE the image on your next step. Use it "
+                + "whenever the answer depends on what an image shows.",
+                properties: ["path": str("Absolute path to an image file.")],
+                required: ["path"]),
+            function(
                 "python_run",
                 "Run Python 3 code on the bridged computer in Nikita's own "
                 + "environment, which already has the heavy libraries: "
@@ -510,7 +518,8 @@ enum NikitaTools {
             return "files_write"
         case "delete_file": return "files_delete"
         case "run_cli", "scan_viewer": return "serial"
-        case "computer_list", "computer_read", "computer_find", "computer_grep":
+        case "computer_list", "computer_read", "computer_find", "computer_grep",
+             "computer_view":
             return "computer_read"
         case "computer_edit": return "computer_write"
         case "computer_write", "computer_mkdir": return "computer_write"
