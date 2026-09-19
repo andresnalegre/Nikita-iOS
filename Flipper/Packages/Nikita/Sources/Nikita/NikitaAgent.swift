@@ -1054,6 +1054,18 @@ public final class NikitaAgent: ObservableObject {
                 return (jsonOK(["output": try await machineRun("host \(command)")]),
                     true)
 
+            case "python_run":
+                let code = (args["code"] as? String) ?? ""
+                // Base64 the code so newlines/quotes survive the bridge, then
+                // run it in Nikita's venv (fallback to system python3).
+                let b64 = Data(code.utf8).base64EncodedString()
+                let cmd = "PY=\"$HOME/.nikita/venv/bin/python3\"; "
+                    + "[ -x \"$PY\" ] || PY=\"$HOME/.nikita/venv/bin/python\"; "
+                    + "[ -x \"$PY\" ] || PY=python3; "
+                    + "echo \(b64) | base64 -d | \"$PY\" -"
+                return (jsonOK(["output": try await machineRun("host \(cmd)")]),
+                    true)
+
             case "transfer":
                 let src = (args["src"] as? String) ?? ""
                 let dst = (args["dst"] as? String) ?? ""

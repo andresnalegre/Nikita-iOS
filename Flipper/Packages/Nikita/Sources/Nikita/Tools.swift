@@ -397,6 +397,17 @@ enum NikitaTools {
                 properties: ["command": str("The shell command to run.")],
                 required: ["command"]),
             function(
+                "python_run",
+                "Run Python 3 code on the bridged computer in Nikita's own "
+                + "environment, which already has the heavy libraries: "
+                + "matplotlib, pandas, numpy, openpyxl, python-docx, reportlab, "
+                + "pypdf, Pillow, cairosvg, qrcode, plotly, pytesseract. The "
+                + "right tool for charts, images (PIL/SVG->PNG), QR codes, "
+                + "spreadsheets, documents and data/PDF/binary work. Print "
+                + "results; save files and report their paths.",
+                properties: ["code": str("The Python 3 source to run.")],
+                required: ["code"]),
+            function(
                 "transfer",
                 "Copy a file BETWEEN the two machines, binary-safe and "
                 + "MD5-verified. The paths decide the direction: a Flipper path "
@@ -450,7 +461,7 @@ enum NikitaTools {
         case "computer_edit": return "computer_write"
         case "computer_write", "computer_mkdir": return "computer_write"
         case "computer_delete": return "computer_delete"
-        case "computer_run": return "computer_run"
+        case "computer_run", "python_run": return "computer_run"
         case "transfer", "download": return "computer_write"
         default: return "files"
         }
