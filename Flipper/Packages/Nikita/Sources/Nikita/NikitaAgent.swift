@@ -46,6 +46,7 @@ public final class NikitaAgent: ObservableObject {
     // back to res.json for the Flipper to display.
     private var buddyReqId: UInt32?
     private var buddyLastHandled: UInt32 = 0
+    private var buddySeeded = false
     private var buddyPoll: Task<Void, Never>?
 
     // The plan the model maintains, and what the UI shows of it.
@@ -135,6 +136,32 @@ public final class NikitaAgent: ObservableObject {
         }
         await readPortableExtras()
         await syncExtrasToFlipper()
+        startScheduler()
+    }
+
+    // MARK: scheduled tasks (Nikita's continuous life, while the app is active)
+
+    private var schedTimer: Task<Void, Never>?
+    private func startScheduler() {
+        guard schedTimer == nil else { return }
+        schedTimer = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                await self?.checkSchedules()
+            }
+        }
+    }
+
+    // Fire any due scheduled tasks as fragments (marked with a clock so their
+    // completion reaches out). iOS suspends background apps, so these fire while
+    // the app is active or catch up on the next launch; qFlipper, always-on,
+    // runs the same shared schedule reliably.
+    private func checkSchedules() async {
+        guard !settings.revealApiKey().isEmpty else { return }
+        for t in NikitaExtras.shared.dueScheduled() {
+            _ = spawnFragment(title: "\u{23f0} " + t.title, task: t.task)
+            NikitaExtras.shared.markFired(id: t.id)
+        }
     }
 
     // MARK: "+" store sync (shared via the Flipper SD)
@@ -170,6 +197,21 @@ public final class NikitaAgent: ObservableObject {
     private func pollBuddyMailbox() async {
         guard !thinking, buddyReqId == nil else { return }
         guard await bridge.isConnected else { return }
+        // Once per launch, seed buddyLastHandled from the last reply on the card
+        // so a request already answered in a previous session isn't re-run at
+        // startup (buddyLastHandled starts at 0). This is the "keeps redoing the
+        // same task" fix, matching qFlipper.
+        if !buddySeeded {
+            buddySeeded = true
+            if let res = try? await bridge.readFile(
+                at: "/ext/nikita/buddy/res.json"), !res.isEmpty,
+               let d = res.data(using: .utf8),
+               let ro = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                let rid = UInt32((ro["id"] as? Double) ?? 0)
+                if rid > buddyLastHandled { buddyLastHandled = rid }
+            }
+            return
+        }
         guard let json = try? await bridge.readFile(
             at: "/ext/nikita/buddy/req.json"), !json.isEmpty,
             let data = json.data(using: .utf8),
@@ -204,6 +246,9 @@ public final class NikitaAgent: ObservableObject {
         try? await bridge.makeDir(at: "/ext/nikita/buddy")
         try? await bridge.writeFile(
             at: "/ext/nikita/buddy/res.json", content: json)
+        // Consume the request so it isn't re-answered on the next launch.
+        try? await bridge.writeFile(
+            at: "/ext/nikita/buddy/req.json", content: "{\"id\":0}")
     }
 
     // MARK: parallel agents (Nikita fragments)
@@ -232,9 +277,20 @@ public final class NikitaAgent: ObservableObject {
             memory: memory.all(),
             machine: machine)
         nextFragmentId += 1
-        // Republish on every change so the strip tracks status/state live.
-        frag.setOnChange { [weak self] in
+        // Republish on every change so the strip tracks status/state live. A
+        // scheduled fragment (title starts with the clock marker) reaches out to
+        // the user with its result the moment it finishes -- that is what gives
+        // scheduled tasks their "she got back to me on her own" feel.
+        var notified = false
+        frag.setOnChange { [weak self, weak frag] in
             self?.objectWillChange.send()
+            guard let frag else { return }
+            if !notified, frag.state == .done, frag.title.hasPrefix("\u{23f0}") {
+                notified = true
+                let body = frag.result.isEmpty ? "Done." : String(frag.result.prefix(240))
+                Task { await NikitaNotifier.shared.reachOut(
+                    title: frag.title, body: body) }
+            }
         }
         fragments.append(frag)
         frag.start()
@@ -947,6 +1003,28 @@ public final class NikitaAgent: ObservableObject {
                 return (jsonOK(["ok": true,
                     "note": "The user was pinged. Also say it in your reply."]),
                     true)
+
+            case "schedule_task":
+                let task = (args["task"] as? String) ?? ""
+                let every = (args["every_minutes"] as? Int)
+                    ?? Int((args["every_minutes"] as? Double) ?? 0)
+                NikitaExtras.shared.addScheduled(
+                    title: (args["title"] as? String) ?? "",
+                    task: task, everyMin: every)
+                return (jsonOK(["ok": true, "note": every > 0
+                    ? "Scheduled every \(every) min; I'll reach out with results."
+                    : "Scheduled once, shortly."]), true)
+            case "list_scheduled":
+                let now = Date().timeIntervalSince1970
+                let list = NikitaExtras.shared.scheduled.map { s in
+                    ["id": s.id, "title": s.title, "everyMin": s.everyMin,
+                     "inSeconds": Int(s.nextRun - now)] as [String: Any]
+                }
+                return (jsonOK(["scheduled": list]), true)
+            case "cancel_scheduled":
+                NikitaExtras.shared.cancelScheduled(
+                    id: (args["id"] as? String) ?? "")
+                return (jsonOK(["ok": true]), true)
 
             case "web_search":
                 let query = (args["query"] as? String) ?? ""

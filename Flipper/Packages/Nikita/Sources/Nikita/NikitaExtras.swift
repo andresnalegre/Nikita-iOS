@@ -36,6 +36,17 @@ public struct NikitaPlugin: Identifiable, Codable, Equatable {
     public var description: String
 }
 
+// A recurring or one-off job Nikita runs on her own -- her continuous life.
+// Keys match qFlipper's so the two sync through /ext/nikita/extras.json.
+public struct NikitaScheduledTask: Identifiable, Codable, Equatable {
+    public var id: String
+    public var title: String
+    public var task: String
+    public var everyMin: Int
+    public var nextRun: Double   // epoch seconds
+    public var enabled: Bool
+}
+
 @MainActor
 public final class NikitaExtras: ObservableObject {
     public static let shared = NikitaExtras()
@@ -43,6 +54,7 @@ public final class NikitaExtras: ObservableObject {
     @Published public private(set) var quickCommands: [NikitaQuickCommand] = []
     @Published public private(set) var skills: [NikitaLearnedSkill] = []
     @Published public private(set) var plugins: [NikitaPlugin] = []
+    @Published public private(set) var scheduled: [NikitaScheduledTask] = []
     // Progress of a running "learn skill" request, shown by the sheet.
     @Published public private(set) var learnStatus = ""
     @Published public private(set) var learnBusy = false
@@ -51,6 +63,7 @@ public final class NikitaExtras: ObservableObject {
         var quickCommands: [NikitaQuickCommand]
         var skills: [NikitaLearnedSkill]
         var plugins: [NikitaPlugin]
+        var scheduled: [NikitaScheduledTask]?
         var touched: String?
     }
 
@@ -81,6 +94,7 @@ public final class NikitaExtras: ObservableObject {
         quickCommands = s.quickCommands
         skills = s.skills
         plugins = s.plugins
+        scheduled = s.scheduled ?? []
         touched = s.touched ?? ""
     }
 
@@ -94,7 +108,7 @@ public final class NikitaExtras: ObservableObject {
     private func writeLocal() {
         let s = Store(
             quickCommands: quickCommands, skills: skills, plugins: plugins,
-            touched: touched.isEmpty ? nil : touched)
+            scheduled: scheduled, touched: touched.isEmpty ? nil : touched)
         if let data = try? JSONEncoder().encode(s) {
             try? data.write(to: url)
         }
@@ -106,7 +120,7 @@ public final class NikitaExtras: ObservableObject {
     public func exportJSON() -> String {
         let s = Store(
             quickCommands: quickCommands, skills: skills, plugins: plugins,
-            touched: touched.isEmpty ? nil : touched)
+            scheduled: scheduled, touched: touched.isEmpty ? nil : touched)
         guard let data = try? JSONEncoder().encode(s),
               let str = String(data: data, encoding: .utf8) else { return "" }
         return str
@@ -125,6 +139,7 @@ public final class NikitaExtras: ObservableObject {
             quickCommands = s.quickCommands
             skills = s.skills
             plugins = s.plugins
+            scheduled = s.scheduled ?? []
             touched = cardTouched
             writeLocal()
             return true
@@ -201,6 +216,50 @@ public final class NikitaExtras: ObservableObject {
 
     public func plugin(named name: String) -> NikitaPlugin? {
         plugins.first { $0.name == name }
+    }
+
+    // MARK: scheduled tasks
+
+    @discardableResult
+    public func addScheduled(
+        title: String, task: String, everyMin: Int
+    ) -> NikitaScheduledTask? {
+        let t = task.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        let now = Date().timeIntervalSince1970
+        let first = everyMin > 0 ? now + Double(everyMin) * 60 : now + 5
+        let l = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let item = NikitaScheduledTask(
+            id: UUID().uuidString,
+            title: l.isEmpty ? String(t.prefix(40)) : l,
+            task: t, everyMin: everyMin, nextRun: first, enabled: true)
+        scheduled.append(item)
+        save()
+        return item
+    }
+
+    public func cancelScheduled(id: String) {
+        scheduled.removeAll { $0.id == id }
+        save()
+    }
+
+    // Tasks whose time has come. Caller fires them, then calls markFired.
+    public func dueScheduled(now: Double = Date().timeIntervalSince1970)
+        -> [NikitaScheduledTask] {
+        scheduled.filter { $0.enabled && $0.nextRun > 0 && now >= $0.nextRun }
+    }
+
+    // Reschedule a recurring task after it fired; drop a one-off.
+    public func markFired(id: String) {
+        let now = Date().timeIntervalSince1970
+        if let i = scheduled.firstIndex(where: { $0.id == id }) {
+            if scheduled[i].everyMin > 0 {
+                scheduled[i].nextRun = now + Double(scheduled[i].everyMin) * 60
+            } else {
+                scheduled.remove(at: i)
+            }
+            save()
+        }
     }
 
     // MARK: skills

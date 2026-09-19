@@ -172,7 +172,29 @@ enum NikitaTools {
                     "message": str("The short line to show the user."),
                     "title": str("Optional heading; defaults to Nikita.")
                 ],
-                required: ["message"])
+                required: ["message"]),
+            function(
+                "schedule_task",
+                "Schedule work to run LATER and on your own -- how you keep "
+                + "living between messages. Give a self-contained task and an "
+                + "interval in minutes: every_minutes>0 repeats it (60 = hourly, "
+                + "1440 = daily); 0 = run once soon. Each firing runs a fragment "
+                + "of you in the background and reaches out with the result. The "
+                + "task must stand alone -- the fragment can't see this chat.",
+                properties: [
+                    "title": str("Short label, e.g. 'hourly check'."),
+                    "task": str("Full, self-contained instruction to run each time."),
+                    "every_minutes": int("Repeat interval in minutes; 0 = once.")
+                ],
+                required: ["task"]),
+            function(
+                "list_scheduled",
+                "List your scheduled tasks (id, title, interval, next run)."),
+            function(
+                "cancel_scheduled",
+                "Cancel a scheduled task by its id (from list_scheduled).",
+                properties: ["id": str("The scheduled task id.")],
+                required: ["id"])
         ]
     }
 
@@ -461,7 +483,8 @@ enum NikitaTools {
         // Not gated by anything: update_plan touches nothing but Nikita's own
         // notes, and the loop depends on it. A user who switched off "memory"
         // did not ask for the agent to stop being able to keep track.
-        case "update_plan", "notify_user": return "plan"
+        case "update_plan", "notify_user", "schedule_task",
+             "list_scheduled", "cancel_scheduled": return "plan"
         case "web_search", "web_fetch": return "web"
         case "spawn_task": return "web"
         case "remember", "list_memory", "forget": return "memory"
