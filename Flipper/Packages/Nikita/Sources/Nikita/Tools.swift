@@ -140,6 +140,22 @@ enum NikitaTools {
                 ],
                 required: ["url"]),
             function(
+                "http_request",
+                "Make an HTTP request to ANY URL and get back status + body -- a "
+                + "real REST/API client, not just web_fetch (for reading pages). "
+                + "Use it to call JSON APIs, hit a webhook, POST/PUT data, send "
+                + "headers. For plain reading prefer web_fetch. http/https only.",
+                properties: [
+                    "url": str("Full URL, http/https."),
+                    "method": str("GET, POST, PUT, PATCH or DELETE. Default GET."),
+                    "headers": [
+                        "type": "object",
+                        "description": "Optional headers as a JSON object."
+                    ] as [String: Any],
+                    "body": str("Optional request body for POST/PUT/PATCH.")
+                ],
+                required: ["url"]),
+            function(
                 "spawn_task",
                 "Split off a FRAGMENT of yourself to work a sub-task in "
                 + "PARALLEL, while you keep going here. The fragment is still "
@@ -485,7 +501,7 @@ enum NikitaTools {
         // did not ask for the agent to stop being able to keep track.
         case "update_plan", "notify_user", "schedule_task",
              "list_scheduled", "cancel_scheduled": return "plan"
-        case "web_search", "web_fetch": return "web"
+        case "web_search", "web_fetch", "http_request": return "web"
         case "spawn_task": return "web"
         case "remember", "list_memory", "forget": return "memory"
         case "press_button": return "buttons"

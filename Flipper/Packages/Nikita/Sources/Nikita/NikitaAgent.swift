@@ -938,6 +938,31 @@ public final class NikitaAgent: ObservableObject {
         return jsonOK(["status": status, "body": text])
     }
 
+    // A generic HTTP client for any URL (method/headers/body). Works straight
+    // from the phone -- no bridge needed -- so Nikita can call real APIs.
+    private func httpRequest(_ args: [String: Any]) async throws -> String {
+        let urlStr = (args["url"] as? String) ?? ""
+        guard let url = URL(string: urlStr),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            return jsonOK(["error": "url must be http/https"])
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = ((args["method"] as? String) ?? "GET").uppercased()
+        if let body = args["body"] as? String, !body.isEmpty {
+            req.httpBody = body.data(using: .utf8)
+            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        if let headers = args["headers"] as? [String: Any] {
+            for (k, v) in headers { req.setValue("\(v)", forHTTPHeaderField: k) }
+        }
+        req.timeoutInterval = 30
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        let text = String(data: data.prefix(12000), encoding: .utf8) ?? "(binary)"
+        return jsonOK(["status": status, "body": text])
+    }
+
     private func machineRun(_ command: String) async throws -> String {
         guard let machine, await machine.isBridgeConnected else {
             throw NikitaDeviceError.failed(
@@ -1123,6 +1148,9 @@ public final class NikitaAgent: ObservableObject {
                     payload["note"] = "Page was longer than the cap and cut here."
                 }
                 return (jsonOK(payload), true)
+
+            case "http_request":
+                return (try await httpRequest(args), true)
 
             case "remember":
                 let fact = (args["fact"] as? String) ?? ""
