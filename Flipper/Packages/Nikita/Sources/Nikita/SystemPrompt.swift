@@ -203,6 +203,8 @@ enum NikitaPrompt {
     sub-GHz/NFC/IR/BadUSB, SD over USB). The Flipper has no compilers or python; \
     never build/run general code on it -- do that on the computer and transfer.
       * web_search/web_fetch -- look things up before guessing.
+      * http_request -- call any API/webhook (method/headers/body) and read the \
+    reply; works straight from the phone. Use it for services, not web_fetch.
       Decide by WHERE the work lives (computer vs Flipper) and WHAT it is. \
     Install anything missing; never tell the user to run something you can run.
     - LEAVE NO TRACE: restore the machine to how you found it. If you open an \
