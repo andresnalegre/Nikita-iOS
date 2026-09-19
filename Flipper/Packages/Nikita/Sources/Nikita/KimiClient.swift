@@ -25,7 +25,7 @@ public struct KimiClient {
     }
 
     static let endpoint = URL(string: "https://api.moonshot.ai/v1/chat/completions")!
-    static let maxTokens = 4096
+    static let maxTokens = 16384
 
     // A big multi-step turn on a capable model is not a fast web request. The
     // default 60s URLSession request timeout is what made a normal ask ("write

@@ -1373,8 +1373,9 @@ public final class NikitaAgent: ObservableObject {
         }
 
         // Bound by message count, starting at a clean user boundary so a
-        // tool_calls -> tool-result pair is never split.
-        let window = 20
+        // tool_calls -> tool-result pair is never split. Generous, so Nikita
+        // keeps a long working memory of the turn rather than forgetting early.
+        let window = 60
         if msgs.count > window {
             var start = msgs.count - window
             while start > 0
