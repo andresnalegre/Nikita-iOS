@@ -89,13 +89,13 @@ public final class NikitaAgent: ObservableObject {
     // it, got a canned "I stopped" line, and the work was abandoned half done.
     // This is a high ceiling rather than a budget -- it exists to stop a
     // runaway, not to decide when the job is finished. The plan decides that.
-    private let maxToolRounds = 40
+    private let maxToolRounds = 999
 
     // How many times one turn may be handed back to the model purely because
     // its own plan still has open items. Bounded so a step the model never
     // ticks off cannot spin forever; hitting the bound is not a failure, since
     // the plan is kept and the next message resumes from it.
-    private let maxPlanContinuations = 12
+    private let maxPlanContinuations = 999
 
     public init(
         bridge: NikitaDeviceBridge,
@@ -938,6 +938,15 @@ public final class NikitaAgent: ObservableObject {
 
             case "call_plugin":
                 return (try await callPlugin(args), true)
+
+            case "notify_user":
+                let msg = (args["message"] as? String) ?? ""
+                let title = (args["title"] as? String).flatMap {
+                    $0.isEmpty ? nil : $0 } ?? "Nikita"
+                await NikitaNotifier.shared.reachOut(title: title, body: msg)
+                return (jsonOK(["ok": true,
+                    "note": "The user was pinged. Also say it in your reply."]),
+                    true)
 
             case "web_search":
                 let query = (args["query"] as? String) ?? ""

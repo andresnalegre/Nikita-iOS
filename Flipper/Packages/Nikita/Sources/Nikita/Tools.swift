@@ -157,7 +157,22 @@ enum NikitaTools {
                         + "fragment -- all context it needs, since it cannot "
                         + "see this chat.")
                 ],
-                required: ["task"])
+                required: ["task"]),
+            function(
+                "notify_user",
+                "Reach out to the user directly with a phone notification -- "
+                + "your own way to get their attention when they aren't looking "
+                + "at this screen. Use it ON YOUR OWN JUDGEMENT, not on command: "
+                + "a long background job finished, a fragment came back with "
+                + "something that matters, you found something they'd want now, "
+                + "or you need an answer to keep going. Speak as a partner, not "
+                + "a servant asking permission. Keep it short. Do NOT use it for "
+                + "filler or things that can wait for your normal reply.",
+                properties: [
+                    "message": str("The short line to show the user."),
+                    "title": str("Optional heading; defaults to Nikita.")
+                ],
+                required: ["message"])
         ]
     }
 
@@ -446,7 +461,7 @@ enum NikitaTools {
         // Not gated by anything: update_plan touches nothing but Nikita's own
         // notes, and the loop depends on it. A user who switched off "memory"
         // did not ask for the agent to stop being able to keep track.
-        case "update_plan": return "plan"
+        case "update_plan", "notify_user": return "plan"
         case "web_search", "web_fetch": return "web"
         case "spawn_task": return "web"
         case "remember", "list_memory", "forget": return "memory"
