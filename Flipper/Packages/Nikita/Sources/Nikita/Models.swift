@@ -5,7 +5,7 @@ import Foundation
 // whose text is folded into the prompt. `dataURL` is a base64 data: URL used
 // both to show a thumbnail and, for images, as the vision payload.
 public struct NikitaAttachment: Identifiable, Equatable {
-    public enum Kind: String { case image, text, file }
+    public enum Kind: String { case image, video, text, file }
     public let id = UUID()
     public var kind: Kind
     public var filename: String

@@ -355,7 +355,9 @@ public final class NikitaAgent: ObservableObject {
             return ["role": "user", "content": text]
         }
         var promptText = text
-        let textFiles = attachments.filter { $0.kind != .image }
+        let textFiles = attachments.filter {
+            $0.kind != .image && $0.kind != .video
+        }
         for f in textFiles {
             if !f.textContent.isEmpty {
                 promptText += "\n\n--- Attached file: \(f.filename) ---\n"
@@ -373,6 +375,13 @@ public final class NikitaAgent: ObservableObject {
             parts.append([
                 "type": "image_url",
                 "image_url": ["url": img.dataURL]
+            ])
+        }
+        // Kimi K2.6 reads video through a video_url part (data: URL).
+        for vid in attachments where vid.kind == .video && !vid.dataURL.isEmpty {
+            parts.append([
+                "type": "video_url",
+                "video_url": ["url": vid.dataURL]
             ])
         }
         return ["role": "user", "content": parts]
@@ -1217,6 +1226,11 @@ public final class NikitaAgent: ObservableObject {
     }
 
     private func emitError(_ text: String) {
+        messages.append(.init(role: .error, text: text))
+    }
+
+    // Surface a UI-side problem (e.g. an attachment too big) in the chat.
+    public func noteError(_ text: String) {
         messages.append(.init(role: .error, text: text))
     }
 

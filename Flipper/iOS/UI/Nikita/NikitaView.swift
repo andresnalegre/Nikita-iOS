@@ -370,9 +370,9 @@ struct NikitaView: View {
                     PhotosPicker(
                         selection: $photoItems,
                         maxSelectionCount: 4,
-                        matching: .images
+                        matching: .any(of: [.images, .videos])
                     ) {
-                        Label("Add files or photos", systemImage: "photo")
+                        Label("Add photo or video", systemImage: "photo")
                     }
                     Button {
                         showFileImporter = true
@@ -486,15 +486,31 @@ struct NikitaView: View {
         for item in items {
             guard let data = try? await item.loadTransferable(
                 type: Data.self) else { continue }
-            let mime = "image/jpeg"
-            let b64 = data.base64EncodedString()
-            let att = NikitaAttachment(
-                kind: .image,
-                filename: "photo.jpg",
-                mime: mime,
-                dataURL: "data:\(mime);base64,\(b64)",
-                byteCount: data.count)
-            await MainActor.run { pending.append(att) }
+            let isVideo = item.supportedContentTypes.contains {
+                $0.conforms(to: .movie) || $0.conforms(to: .video)
+            }
+            if isVideo {
+                if data.count > 12 * 1024 * 1024 {
+                    await MainActor.run {
+                        agent.noteError("That video is too large to send inline "
+                            + "(~12 MB max). Trim or lower the resolution first.")
+                    }
+                    continue
+                }
+                let mime = "video/mp4"
+                let b64 = data.base64EncodedString()
+                let att = NikitaAttachment(
+                    kind: .video, filename: "video.mp4", mime: mime,
+                    dataURL: "data:\(mime);base64,\(b64)", byteCount: data.count)
+                await MainActor.run { pending.append(att) }
+            } else {
+                let mime = "image/jpeg"
+                let b64 = data.base64EncodedString()
+                let att = NikitaAttachment(
+                    kind: .image, filename: "photo.jpg", mime: mime,
+                    dataURL: "data:\(mime);base64,\(b64)", byteCount: data.count)
+                await MainActor.run { pending.append(att) }
+            }
         }
         await MainActor.run { photoItems = [] }
     }
@@ -507,12 +523,27 @@ struct NikitaView: View {
             let name = url.lastPathComponent
             let ext = url.pathExtension.lowercased()
             let imageExts = ["png", "jpg", "jpeg", "gif", "webp", "heic"]
+            let videoExts = ["mp4", "mov", "webm", "m4v", "mpeg", "mpg"]
             if imageExts.contains(ext) {
                 let mime = ext == "png" ? "image/png"
                     : (ext == "webp" ? "image/webp" : "image/jpeg")
                 let b64 = data.base64EncodedString()
                 pending.append(NikitaAttachment(
                     kind: .image, filename: name, mime: mime,
+                    dataURL: "data:\(mime);base64,\(b64)",
+                    byteCount: data.count))
+            } else if videoExts.contains(ext) {
+                // Base64 video only works for small clips; cap ~12 MB.
+                guard data.count <= 12 * 1024 * 1024 else {
+                    agent.noteError("Video \(name) is too large to send inline "
+                        + "(~12 MB max). Trim or lower the resolution first.")
+                    continue
+                }
+                let mime = ext == "mov" ? "video/quicktime"
+                    : (ext == "webm" ? "video/webm" : "video/mp4")
+                let b64 = data.base64EncodedString()
+                pending.append(NikitaAttachment(
+                    kind: .video, filename: name, mime: mime,
                     dataURL: "data:\(mime);base64,\(b64)",
                     byteCount: data.count))
             } else if let text = String(data: data, encoding: .utf8) {
@@ -612,7 +643,8 @@ private struct NikitaAttachmentChip: View {
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                 } else {
                     VStack(spacing: 2) {
-                        Image(systemName: "doc.fill")
+                        Image(systemName: attachment.kind == .video
+                              ? "film.fill" : "doc.fill")
                             .font(.system(size: 20))
                         Text(attachment.filename)
                             .font(.system(size: 8))
@@ -706,8 +738,10 @@ private struct NikitaBubbleAttachment: View {
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         } else {
             HStack(spacing: 6) {
-                Image(systemName: "doc.fill")
-                Text(attachment.filename).lineLimit(1)
+                Image(systemName: attachment.kind == .video
+                      ? "film.fill" : "doc.fill")
+                Text(attachment.kind == .video
+                     ? "video" : attachment.filename).lineLimit(1)
             }
             .font(.caption)
             .padding(8)
