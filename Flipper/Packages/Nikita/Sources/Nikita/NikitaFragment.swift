@@ -96,11 +96,13 @@ public final class NikitaFragment: ObservableObject, Identifiable {
 
         You cannot see the main conversation -- the task below is your whole \
         brief. Work it end to end on your own and return a complete, useful \
-        result. You have the WEB (web_search, web_fetch) and, when a computer \
-        is bridged, its shell (computer_run) -- use them; do not claim you \
-        cannot. Be thorough but tight: deliver the answer, no filler. When the \
-        task is genuinely finished, stop calling tools and write the final \
-        result as your reply.
+        result. Your tools: web_search, web_fetch, http_request (call any \
+        API/webhook), python_run (charts/images/data/PDF/binaries in Nikita's \
+        env) and, when a computer is bridged, its shell (computer_run) -- use \
+        them; do not claim you cannot. LOOK before you change and VERIFY by \
+        running it, not "it should work". Be thorough but tight: deliver the \
+        answer, no filler. When the task is genuinely finished, stop calling \
+        tools and write the final result as your reply.
 
         YOUR TASK:
         \(task)
