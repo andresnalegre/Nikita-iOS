@@ -152,6 +152,12 @@ public final class NikitaAgent: ObservableObject {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 30_000_000_000)
                 await self?.checkSchedules()
+                // Live shared mind: adopt anything a sibling channel (qFlipper,
+                // the Flipper Buddy) has learned into the "+" store since we last
+                // looked, so skills/quick-commands/plugins stay one set across
+                // all three. importJSON is adopt-if-newer, so this is a no-op
+                // when nothing changed. (Memory is still local on iOS -- see note.)
+                await self?.readPortableExtras()
             }
         }
     }
@@ -1020,9 +1026,8 @@ public final class NikitaAgent: ObservableObject {
         var out: [String: Any] = [:]
         out["network"] = await NikitaSense.pathType()
 
-        // Her body: a light probe of the Flipper (no device_info over BLE).
-        let flipperThere = (try? await bridge.fileInfo(at: "/ext")) != nil
-        out["flipperConnected"] = flipperThere
+        // Her body: is the Flipper actually connected right now.
+        out["flipperConnected"] = await bridge.isConnected
 
         // The wider world, when a computer is on the bridge.
         if let machine, await machine.isBridgeConnected {
