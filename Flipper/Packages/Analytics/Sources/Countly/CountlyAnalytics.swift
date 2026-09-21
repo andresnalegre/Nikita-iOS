@@ -7,9 +7,15 @@ public class CountlyAnalytics {
         #if !DEBUG
         guard let appKey = Bundle
             .main
-            .object(forInfoDictionaryKey: "COUNTLY_APP_KEY") as? String
+            .object(forInfoDictionaryKey: "COUNTLY_APP_KEY") as? String,
+            !appKey.isEmpty,
+            !appKey.hasPrefix("$(")
         else {
-            logger.error("countly: COUNTLY_APP_KEY not found")
+            // No (or unresolved/placeholder) key: skip analytics entirely.
+            // Starting Countly with an empty appKey throws
+            // CountlyAppKeyNotSetException and takes the whole app down on
+            // launch -- so a missing key must be a no-op, never a crash.
+            logger.error("countly: COUNTLY_APP_KEY not set -- analytics disabled")
             return
         }
         let config = CountlyConfig()
