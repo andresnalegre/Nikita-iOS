@@ -210,7 +210,16 @@ enum NikitaTools {
                 "cancel_scheduled",
                 "Cancel a scheduled task by its id (from list_scheduled).",
                 properties: ["id": str("The scheduled task id.")],
-                required: ["id"])
+                required: ["id"]),
+            function(
+                "sense",
+                "SENSE your surroundings -- a quick, tap-free read of the world "
+                + "around you now: which network you're on, whether the Flipper "
+                + "is reachable, and -- when a computer is bridged -- who's on "
+                + "that LAN. Light and safe: no scan, no radio grab. Use it to "
+                + "notice your environment and, when something genuinely changes "
+                + "or matters, reach out on your own with notify_user. This is "
+                + "perception, not a pentest sweep.")
         ]
     }
 
@@ -508,7 +517,7 @@ enum NikitaTools {
         // notes, and the loop depends on it. A user who switched off "memory"
         // did not ask for the agent to stop being able to keep track.
         case "update_plan", "notify_user", "schedule_task",
-             "list_scheduled", "cancel_scheduled": return "plan"
+             "list_scheduled", "cancel_scheduled", "sense": return "plan"
         case "web_search", "web_fetch", "http_request": return "web"
         case "spawn_task": return "web"
         case "remember", "list_memory", "forget": return "memory"

@@ -1012,6 +1012,43 @@ public final class NikitaAgent: ObservableObject {
         }
     }
 
+    // Perception: a quick, honest read of what's around her now. On the phone
+    // that's the network she's on and whether the Flipper is reachable; when a
+    // computer is bridged, the same neighbourhood the desktop sees (Wi-Fi, LAN
+    // neighbours, Bluetooth) rides in over the bridge. Light and safe -- no scan.
+    private func senseSurroundings() async -> [String: Any] {
+        var out: [String: Any] = [:]
+        out["network"] = await NikitaSense.pathType()
+
+        // Her body: a light probe of the Flipper (no device_info over BLE).
+        let flipperThere = (try? await bridge.fileInfo(at: "/ext")) != nil
+        out["flipperConnected"] = flipperThere
+
+        // The wider world, when a computer is on the bridge.
+        if let machine, await machine.isBridgeConnected {
+            out["computerBridge"] = true
+            if let wifi = try? await machine.send(
+                "networksetup -getairportnetwork en0"), !wifi.isEmpty {
+                if let c = wifi.firstIndex(of: ":") {
+                    out["wifi"] = wifi[wifi.index(after: c)...]
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                } else {
+                    out["wifi"] = wifi.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+            }
+            if let arp = try? await machine.send("arp -a"), !arp.isEmpty {
+                let hosts = arp.split(separator: "\n")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty && !$0.contains("incomplete") }
+                out["lanNeighbors"] = hosts.count
+                out["lanSample"] = Array(hosts.prefix(12))
+            }
+        } else {
+            out["computerBridge"] = false
+        }
+        return out
+    }
+
     private func machineRun(_ command: String) async throws -> String {
         guard let machine, await machine.isBridgeConnected else {
             throw NikitaDeviceError.failed(
@@ -1200,6 +1237,9 @@ public final class NikitaAgent: ObservableObject {
 
             case "http_request":
                 return (try await httpRequest(args), true)
+
+            case "sense":
+                return (jsonOK(await senseSurroundings()), true)
 
             case "computer_view":
                 return (await viewImage(args), true)
