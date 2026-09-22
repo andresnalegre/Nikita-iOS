@@ -166,6 +166,20 @@ final class NikitaDictation: ObservableObject {
         teardown()
     }
 
+    // Hard reset used right after the draft is sent: cancel recognition so no
+    // late "final" result arrives, and clear the transcript so the view's
+    // onChange can't write it back into the (now empty) draft.
+    func reset() {
+        if listening || engine.isRunning {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+            request?.endAudio()
+        }
+        task?.cancel()
+        teardown()
+        transcript = ""
+    }
+
     private func teardown() {
         request = nil
         task = nil

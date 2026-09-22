@@ -296,6 +296,9 @@ struct NikitaView: View {
                 }
                 .padding()
             }
+            // Dragging the conversation dismisses the keyboard so the whole
+            // screen is readable while scrolling back through the chat.
+            .scrollDismissesKeyboard(.immediately)
             .onChange(of: agent.messages.count) { _ in
                 withAnimation { proxy.scrollTo("bottom", anchor: .bottom) }
             }
@@ -451,7 +454,11 @@ struct NikitaView: View {
         .padding(.horizontal)
         .padding(.vertical, 8)
         .onChange(of: dictation.transcript) { text in
-            if !text.isEmpty { draft = text }
+            // Only stream into the draft while the mic is actually open. A final
+            // recognition result can land just AFTER send() clears the draft;
+            // without this guard it would repopulate the field instead of
+            // leaving the placeholder.
+            if dictation.listening, !text.isEmpty { draft = text }
         }
         .onChange(of: photoItems) { items in
             guard !items.isEmpty else { return }
@@ -581,13 +588,13 @@ struct NikitaView: View {
     }
 
     private func send() {
-        // If the mic is still open, close it first so the final words land and
-        // the recognizer releases the audio session before the turn starts.
-        if dictation.listening { dictation.stop() }
         let text = draft
         let attachments = pending
         draft = ""
         pending = []
+        // Fully cancel any dictation so a late final result can't repopulate the
+        // freshly-cleared draft (the placeholder must show again after sending).
+        dictation.reset()
         agent.send(text, attachments: attachments)
     }
 }
@@ -710,14 +717,28 @@ private struct NikitaMessageRow: View {
                 .background(Color.orange.opacity(0.1))
                 .clipShape(RoundedRectangle(cornerRadius: 12))
         default:
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(message.toolCalls) { call in
-                    NikitaToolRow(call: call)
-                }
-                if !message.text.isEmpty {
-                    Text(message.text)
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            // Nikita's own turns: her face sits beside the message so she is
+            // present in the conversation, not just disembodied text.
+            HStack(alignment: .top, spacing: 8) {
+                Image("NikitaAvatar")
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 28, height: 28)
+                    .clipShape(Circle())
+                    .overlay(Circle().stroke(Color.accentColor.opacity(0.5),
+                                             lineWidth: 1))
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Nikita")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundColor(.accentColor)
+                    ForEach(message.toolCalls) { call in
+                        NikitaToolRow(call: call)
+                    }
+                    if !message.text.isEmpty {
+                        Text(message.text)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
             }
         }
