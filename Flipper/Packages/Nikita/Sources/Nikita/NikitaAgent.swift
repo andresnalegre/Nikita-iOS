@@ -51,6 +51,9 @@ public final class NikitaAgent: ObservableObject {
     // a vision message when the tool round ends.
     private var pendingViewImages: [String] = []
     private var buddyPoll: Task<Void, Never>?
+    // Messages the user sent while a turn was already running. They show in the
+    // chat immediately and run, in order, when the current turn finishes.
+    private var queued: [(String, [NikitaAttachment])] = []
 
     // The plan the model maintains, and what the UI shows of it.
     @Published public private(set) var planItems: [NikitaPlanItem] = []
@@ -467,14 +470,26 @@ public final class NikitaAgent: ObservableObject {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // With attachments the text may be empty ("look at this") -- an image
         // alone is a valid turn. Without any, empty text is a no-op.
-        guard (!trimmed.isEmpty || !attachments.isEmpty), !thinking else {
+        guard !trimmed.isEmpty || !attachments.isEmpty else { return }
+
+        // Always show it in the chat right away.
+        messages.append(.init(
+            role: .user, text: trimmed, attachments: attachments))
+
+        // Busy? Queue it -- it runs when the current turn ends (see runTurn's
+        // defer). This is what lets the user line up a follow-up while Nikita
+        // is still working.
+        if thinking {
+            queued.append((trimmed, attachments))
             return
         }
 
-        messages.append(.init(
-            role: .user, text: trimmed, attachments: attachments))
-        wire.append(userWireMessage(text: trimmed, attachments: attachments))
+        dispatch(trimmed, attachments)
+    }
 
+    // Put a message on the wire and start its turn.
+    private func dispatch(_ trimmed: String, _ attachments: [NikitaAttachment]) {
+        wire.append(userWireMessage(text: trimmed, attachments: attachments))
         currentTask = Task { await runTurn(userText: trimmed) }
     }
 
@@ -547,6 +562,12 @@ public final class NikitaAgent: ObservableObject {
             // Mirror the conversation context to the card so the same chat
             // continues on qFlipper (and back).
             Task { await syncHistoryToFlipper() }
+
+            // Anything the user queued while this turn ran? Fire the next one.
+            if !queued.isEmpty {
+                let (t, a) = queued.removeFirst()
+                dispatch(t, a)
+            }
         }
 
         let key = settings.revealApiKey()

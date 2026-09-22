@@ -433,6 +433,17 @@ struct NikitaView: View {
             }
 
             if agent.thinking {
+                // Let the user queue a follow-up while Nikita is working: a send
+                // button appears the moment there's text, next to the stop button.
+                if canSend {
+                    Button {
+                        send()
+                    } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundColor(.accentColor)
+                    }
+                }
                 Button {
                     agent.stop()
                 } label: {
