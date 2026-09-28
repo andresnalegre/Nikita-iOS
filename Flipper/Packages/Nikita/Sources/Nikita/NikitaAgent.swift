@@ -140,9 +140,16 @@ public final class NikitaAgent: ObservableObject {
         NikitaExtras.shared.syncHook = { [weak self] in
             Task { await self?.syncExtrasToFlipper() }
         }
-        await readPortableExtras()
-        await syncExtrasToFlipper()
-        await readPortableHistory()
+        // Card sync is several slow BLE round trips. Run it in the BACKGROUND so
+        // the assistant screen is usable immediately instead of blocking the
+        // whole "connect" on the Flipper. Order is preserved (adopt newer, then
+        // push, then adopt history) but off the critical path.
+        Task { [weak self] in
+            guard let self else { return }
+            await self.readPortableExtras()
+            await self.syncExtrasToFlipper()
+            await self.readPortableHistory()
+        }
         startScheduler()
     }
 
@@ -624,6 +631,7 @@ public final class NikitaAgent: ObservableObject {
             var tools = NikitaTools.offered(
                 needsDevice: needsTools,
                 hasBridge: hasBridge,
+                connected: connected,
                 isAllowed: { self.settings.isAllowed($0) })
             // MCP tools, appended after the access filter: their names come
             // from the servers at runtime, so they are not in the static

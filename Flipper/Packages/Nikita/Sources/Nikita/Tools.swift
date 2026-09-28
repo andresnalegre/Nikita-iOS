@@ -1,11 +1,16 @@
 import Foundation
 
 // The tool schemas the model is offered, in OpenAI function-calling shape. This
-// is the desktop Nikita's BLE toolbox: storage over RPC, the framebuffer, the
-// full D-pad (no CLI to navigate deterministically, so up/down/left/right earn
+// is Nikita's BLE toolbox: storage over RPC, the framebuffer, the full D-pad
+// (no on-device CLI to navigate deterministically, so up/down/left/right earn
 // their place) and App RPC open/close -- plus the three memory tools, which
-// always travel. There is no run_cli and no computer_* here: an iPhone has no
-// serial CLI to the Flipper and no shell of its own.
+// always travel.
+// run_cli AND the computer_* tools ARE offered here too (see `offered`), the
+// moment a Flipper is connected: the iPhone has no shell of its own, but it
+// reaches the Flipper's firmware CLI and the whole bridged computer THROUGH the
+// nikita-flipper-bridge, exactly like the desktop Nikita. They are gated by the
+// per-family access filter (the computer_* families default OFF until the user
+// switches them on in Nikita settings) and by the bridge's own --allow-host.
 enum NikitaTools {
 
     static func function(
@@ -543,14 +548,19 @@ enum NikitaTools {
     static func offered(
         needsDevice: Bool,
         hasBridge: Bool = false,
+        connected: Bool = false,
         isAllowed: (String) -> Bool
     ) -> [[String: Any]] {
         var all = memoryTools
         if needsDevice { all += deviceTools }
-        // Only when a bridge is actually connected. Offering these to the
-        // model with nothing behind them invites it to promise work it cannot
-        // do and then report a connection error as a result.
-        if hasBridge { all += bridgeTools }
+        // Offer run_cli / computer_* whenever a Flipper is CONNECTED, not only
+        // when the bridge probe currently says yes. The probe is a slow mailbox
+        // round trip that is often falsely negative right after the bridge comes
+        // up -- and hiding these tools then is what pushed Nikita to hand-roll
+        // /ext/nikita/bridge/req|res with file tools and loop. run_cli's own
+        // "bridge not running" message is the honest signal when it truly is
+        // down; letting her call it means a real-but-unprobed bridge just works.
+        if hasBridge || connected { all += bridgeTools }
         return all.filter { t in
             guard
                 let fn = t["function"] as? [String: Any],
