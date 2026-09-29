@@ -70,19 +70,56 @@ struct LiveDeviceBridge: NikitaDeviceBridge {
 
     func readFile(at path: String) async throws -> String {
         var bytes: [UInt8] = []
-        for try await chunk in await storage.read(at: .init(string: path)) {
-            bytes.append(contentsOf: chunk)
-            // The desktop caps a read at ~8 KB of text; do the same so a huge
-            // binary can't blow the context window.
-            if bytes.count > 8 * 1024 { break }
+        do {
+            for try await chunk in await storage.read(at: .init(string: path)) {
+                bytes.append(contentsOf: chunk)
+                // The desktop caps a read at ~8 KB of text; do the same so a huge
+                // binary can't blow the context window.
+                if bytes.count > 8 * 1024 { break }
+            }
+        } catch {
+            // A file that is not there yet is the NORMAL case for a mailbox
+            // response (/ext/nikita/bridge/res, /ext/nikita/agent/res) that the
+            // other side has not written -- the RPC surfaces it as a Peripheral
+            // error. Treat "can't read it" as "empty / not ready", never a hard
+            // failure: a red error here is what made Nikita think the bridge was
+            // broken and reinstall in a loop. Callers poll and retry.
+            return ""
         }
         return String(decoding: bytes, as: UTF8.self)
     }
 
     func writeFile(at path: String, content: String) async throws {
-        let stream = await storage.write(
-            at: .init(string: path), bytes: .init(content.utf8))
-        for try await _ in stream {} // drain to completion
+        // A BLE storage write can stall indefinitely if the link congests or the
+        // device is busy -- and an un-timed drain then hangs the WHOLE turn
+        // ("writing to the Flipper" that never returns, the mailbox req never
+        // lands, nothing reaches the target). Race the write against a timeout so
+        // it fails fast and LOUD instead of hanging, the same guard readScreen
+        // uses. A thrown timeout lets the caller (and Nikita's self-audit) react
+        // and retry rather than freeze.
+        let bytes = [UInt8](content.utf8)
+        let ok = try await withThrowingTaskGroup(of: Bool.self) {
+            group -> Bool in
+            group.addTask {
+                let stream = await storage.write(
+                    at: .init(string: path), bytes: bytes)
+                for try await _ in stream {} // drain to completion
+                return true
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: 15 * 1_000_000_000)
+                return false // timed out
+            }
+            let first = try await group.next() ?? false
+            group.cancelAll()
+            return first
+        }
+        if !ok {
+            throw NikitaDeviceError.failed(
+                "Writing to \(path) timed out -- the BLE link stalled, so the "
+                + "file may not have been saved. Check the Flipper connection "
+                + "(reconnect / move closer) and retry.")
+        }
     }
 
     func makeDir(at path: String) async throws {

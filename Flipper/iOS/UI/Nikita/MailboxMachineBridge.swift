@@ -19,8 +19,18 @@ final class MailboxMachineBridge: NikitaMachineBridge {
 
     var isBridgeConnected: Bool {
         get async {
-            if let p = probe, Date().timeIntervalSince(p.at) < 20 { return p.ok }
-            let ok = (try? await roundTrip("bridge", timeout: 3)) != nil
+            // Cache a positive result for a while (it's stable), but re-check a
+            // negative one quickly -- right after `bridge.install` the bridge
+            // needs a few seconds to come up, and a stale "false" cached for 20s
+            // is exactly what made Nikita re-run the installer in a loop.
+            if let p = probe {
+                let age = Date().timeIntervalSince(p.at)
+                if p.ok, age < 20 { return true }
+                if !p.ok, age < 4 { return false }
+            }
+            // A full mailbox round trip (BLE -> serial -> run -> back) is slow
+            // just after startup; give it a real window instead of 3s.
+            let ok = (try? await roundTrip("bridge", timeout: 12)) != nil
             probe = (Date(), ok)
             return ok
         }
