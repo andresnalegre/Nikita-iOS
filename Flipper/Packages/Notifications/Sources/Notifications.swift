@@ -80,6 +80,20 @@ public class Notifications: NSObject, ObservableObject {
 }
 
 extension Notifications: UNUserNotificationCenterDelegate {
+    // Present notifications even when the app is in the FOREGROUND. Without
+    // this, iOS silently drops any local or push notification that fires while
+    // the app is open -- which is exactly when Nikita reaches out mid-chat, so
+    // nothing arrived even with notifications fully enabled. This is the single
+    // delegate for the whole app, so it covers both Nikita's own local pings
+    // (notify_user) and Firebase pushes.
+    public nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler:
+            @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound, .badge])
+    }
 }
 
 extension Notifications: MessagingDelegate {

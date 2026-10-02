@@ -136,6 +136,9 @@ public class Device: ObservableObject {
                     return
                 }
                 status = .connected
+                // The link came up and held long enough to talk: forget the
+                // backoff so the next genuine drop reconnects promptly.
+                reconnectAttempt = 0
                 logger.info("connected")
                 try await loadStorageInfo()
                 reportRPCInfo()
@@ -149,14 +152,43 @@ public class Device: ObservableObject {
 
     var reconnectOnDisconnect = true
 
+    // Reconnect with a growing delay instead of instantly. The Flipper's light
+    // BLE radio can only hold one link and occasionally drops it; an immediate
+    // connect() on every drop turned a single hiccup into a visible
+    // connect->drop->connect flap several times a second ("cai e volta toda
+    // hora"). Backing off lets the radio settle, and a connection that holds
+    // resets the delay (see didConnect).
+    private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
+
     func didDisconnect() {
         logger.info("disconnected")
         status = .disconnected
         guard reconnectOnDisconnect else {
+            cancelReconnect()
             return
         }
-        logger.debug("reconnecting")
-        connect()
+        scheduleReconnect()
+    }
+
+    private func scheduleReconnect() {
+        reconnectTask?.cancel()
+        // 0.3s, 0.6s, 1.2s, 2.5s, then hold at 5s.
+        let delaysMs: [UInt64] = [300, 600, 1200, 2500, 5000]
+        let ms = delaysMs[min(reconnectAttempt, delaysMs.count - 1)]
+        reconnectAttempt += 1
+        logger.debug("reconnecting in \(ms)ms")
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: ms * 1_000_000)
+            guard !Task.isCancelled else { return }
+            guard let self, self.reconnectOnDisconnect else { return }
+            self.connect()
+        }
+    }
+
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
     }
 
     func waitForProtobufVersion() async throws {
@@ -201,11 +233,14 @@ public class Device: ObservableObject {
         }
         logger.info("connecting")
         reconnectOnDisconnect = true
+        cancelReconnect()
         pairedDevice.connect()
     }
 
     public func disconnect() {
         reconnectOnDisconnect = false
+        cancelReconnect()
+        reconnectAttempt = 0
         pairedDevice.disconnect()
     }
 

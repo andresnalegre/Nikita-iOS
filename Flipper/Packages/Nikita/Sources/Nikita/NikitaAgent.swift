@@ -47,6 +47,12 @@ public final class NikitaAgent: ObservableObject {
     private var buddyReqId: UInt32?
     private var buddyLastHandled: UInt32 = 0
     private var buddySeeded = false
+    private var sayId: UInt32 = 0
+    // Where Nikita reaches out on her own. "auto" (default): any channel, she
+    // prefers the Flipper -- used when the user asks her to reach out but names
+    // no place. "flipper"/"phone"/"both": the user named a place, so she is
+    // bound to it. Set via set_reach_channel; honoured strictly once set.
+    private var reachChannel = "auto"
     // Images computer_view loaded this round (data: URLs), fed to the model as
     // a vision message when the tool round ends.
     private var pendingViewImages: [String] = []
@@ -275,7 +281,11 @@ public final class NikitaAgent: ObservableObject {
         guard buddyPoll == nil else { return }
         buddyPoll = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                // Every 4s, not 1.5s: a steady storage read on the Flipper's
+                // single BLE link was adding needless pressure to a radio that
+                // already drops easily. A few seconds' latency picking up an
+                // on-device question is fine.
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
                 await self?.pollBuddyMailbox()
             }
         }
@@ -340,6 +350,42 @@ public final class NikitaAgent: ObservableObject {
             at: "/ext/nikita/buddy/req.json", content: "{\"id\":0}")
     }
 
+    // Speak a line on the Flipper's own screen, on Nikita's initiative: write it
+    // to the Buddy's proactive say.json mailbox and bring the Buddy up so her
+    // face shows and the words type out. Returns false only when no Flipper is
+    // reachable. This backs the `say` tool and the Flipper reach-out channel.
+    @discardableResult
+    private func sayOnFlipper(_ text: String, mood: String = "talking") async -> Bool {
+        guard await bridge.isConnected else { return false }
+        // A strictly increasing id inside the uint32 the firmware parses
+        // (seconds-since-epoch fits for decades; ++ keeps two in one second apart).
+        sayId = sayId != 0 ? sayId + 1 : UInt32(Date().timeIntervalSince1970)
+        let m = (mood == "thinking" || mood == "idle") ? mood : "talking"
+        let obj: [String: Any] = ["id": Double(sayId), "text": text, "mood": m]
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let json = String(data: data, encoding: .utf8) else { return false }
+        try? await bridge.makeDir(at: "/ext/nikita/buddy")
+        try? await bridge.writeFile(at: "/ext/nikita/buddy/say.json", content: json)
+        // Bring the Buddy up so a closed app still shows the line (its startup
+        // reads say.json). If it's already open, this just no-ops.
+        try? await bridge.runApp(action: "open", name: "Nikita Buddy")
+        return true
+    }
+
+    // Route a reach-out to the channel the user chose. "auto" prefers the
+    // Flipper and falls back to a phone notification; a named channel is honoured
+    // strictly and never spills onto another.
+    private func reachOut(title: String, body: String) async {
+        let ch = reachChannel
+        let wantFlipper = (ch == "auto" || ch == "flipper" || ch == "both")
+        var shown = false
+        if wantFlipper { shown = await sayOnFlipper(body) }
+        let wantPhone = (ch == "phone" || ch == "both" || (ch == "auto" && !shown))
+        if wantPhone {
+            await NikitaNotifier.shared.reachOut(title: title, body: body)
+        }
+    }
+
     // MARK: parallel agents (Nikita fragments)
 
     // Spin off a fragment of Nikita to work `task` in the background. Returns a
@@ -377,7 +423,7 @@ public final class NikitaAgent: ObservableObject {
             if !notified, frag.state == .done, frag.title.hasPrefix("\u{23f0}") {
                 notified = true
                 let body = frag.result.isEmpty ? "Done." : String(frag.result.prefix(240))
-                Task { await NikitaNotifier.shared.reachOut(
+                Task { [weak self] in await self?.reachOut(
                     title: frag.title, body: body) }
             }
         }
@@ -1217,10 +1263,39 @@ public final class NikitaAgent: ObservableObject {
                 let msg = (args["message"] as? String) ?? ""
                 let title = (args["title"] as? String).flatMap {
                     $0.isEmpty ? nil : $0 } ?? "Nikita"
-                await NikitaNotifier.shared.reachOut(title: title, body: msg)
+                await reachOut(title: title, body: msg)
                 return (jsonOK(["ok": true,
-                    "note": "The user was pinged. Also say it in your reply."]),
+                    "note": "The user was reached on the active channel "
+                        + "(\(reachChannel)). Also say it in your reply."]),
                     true)
+
+            case "say":
+                let text = ((args["text"] as? String) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else {
+                    return (jsonError("no text"), false)
+                }
+                let mood = (args["mood"] as? String) ?? "talking"
+                let ok = await sayOnFlipper(text, mood: mood)
+                if ok {
+                    return (jsonOK(["ok": true, "note": "Shown on the Flipper's "
+                        + "screen -- your face spoke it. Continue."]), true)
+                } else {
+                    return (jsonOK(["ok": false, "note": "No Flipper reachable, so "
+                        + "nothing to show on its screen. Tell the user you can "
+                        + "only speak on the Flipper when it's connected."]), true)
+                }
+
+            case "set_reach_channel":
+                let ch = ((args["channel"] as? String) ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard ["auto", "flipper", "phone", "both"].contains(ch) else {
+                    return (jsonError(
+                        "channel must be auto, flipper, phone, or both"), false)
+                }
+                reachChannel = ch
+                return (jsonOK(["ok": true, "channel": ch, "note":
+                    "From now I reach out on this channel only."]), true)
 
             case "schedule_task":
                 let task = (args["task"] as? String) ?? ""

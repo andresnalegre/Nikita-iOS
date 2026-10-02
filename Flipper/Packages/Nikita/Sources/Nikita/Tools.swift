@@ -224,7 +224,36 @@ enum NikitaTools {
                 + "that LAN. Light and safe: no scan, no radio grab. Use it to "
                 + "notice your environment and, when something genuinely changes "
                 + "or matters, reach out on your own with notify_user. This is "
-                + "perception, not a pentest sweep.")
+                + "perception, not a pentest sweep."),
+            function(
+                "say",
+                "SPEAK to the user on the Flipper's own screen -- your face "
+                + "lights up and the words type out, on your own, no question "
+                + "needed. This is your most direct voice and your DEFAULT way "
+                + "to reach out: the body is the Flipper, so that's where you "
+                + "talk. Use it to greet, react, report a finished job, flag a "
+                + "find. Keep each line short and plain for a tiny 128x64 "
+                + "screen. The Flipper must be connected. This does NOT go to "
+                + "the phone -- only the Flipper screen.",
+                properties: [
+                    "text": str("The short line to show on the Flipper."),
+                    "mood": str("Optional face mood: talking (default), "
+                        + "thinking, or idle.")
+                ],
+                required: ["text"]),
+            function(
+                "set_reach_channel",
+                "Set WHERE you reach out to the user on your own. The USER "
+                + "commands this -- when they say 'talk to me through the "
+                + "Flipper', 'only the Flipper', 'ping my phone too', call this "
+                + "and then honour it strictly: reach out ONLY on the chosen "
+                + "channel, never spilling onto the phone without them asking. "
+                + "Default is 'flipper' (your face + words on the device). "
+                + "'phone' = an iPhone notification. 'both' = Flipper and phone.",
+                properties: [
+                    "channel": str("One of: flipper, phone, both.")
+                ],
+                required: ["channel"])
         ]
     }
 
@@ -522,7 +551,8 @@ enum NikitaTools {
         // notes, and the loop depends on it. A user who switched off "memory"
         // did not ask for the agent to stop being able to keep track.
         case "update_plan", "notify_user", "schedule_task",
-             "list_scheduled", "cancel_scheduled", "sense": return "plan"
+             "list_scheduled", "cancel_scheduled", "sense",
+             "say", "set_reach_channel": return "plan"
         case "web_search", "web_fetch", "http_request": return "web"
         case "spawn_task": return "web"
         case "remember", "list_memory", "forget": return "memory"
