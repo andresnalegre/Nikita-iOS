@@ -367,7 +367,9 @@ public final class NikitaAgent: ObservableObject {
         try? await bridge.makeDir(at: "/ext/nikita/buddy")
         try? await bridge.writeFile(at: "/ext/nikita/buddy/say.json", content: json)
         // Bring the Buddy up so a closed app still shows the line (its startup
-        // reads say.json). If it's already open, this just no-ops.
+        // reads say.json). It is built into the firmware now, so it opens BY
+        // NAME -- the loader resolves "Nikita Buddy" like any built-in. If it's
+        // already open this just no-ops.
         try? await bridge.runApp(action: "open", name: "Nikita Buddy")
         return true
     }
